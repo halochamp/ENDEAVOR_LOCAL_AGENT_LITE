@@ -1,0 +1,1538 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ENDEAVOR AGENT LITE</title>
+<style>
+/* ── Reset ────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  height: 100%;
+  background: #1e1e1e;
+  color: #d4d4d4;
+  font-family: -apple-system, 'Segoe UI', system-ui, sans-serif;
+  font-size: 13px;
+  overflow: hidden;
+}
+
+/* ── App layout: icon-bar | panel | chat ──────────────────────────── */
+#app {
+  display: grid;
+  grid-template-columns: 60px 0px 1fr;
+  height: 100vh;
+  transition: grid-template-columns 0.15s ease;
+}
+#app.panel-open { grid-template-columns: 60px 320px 1fr; }
+
+/* ── Icon bar (60px, always visible) ─────────────────────────────── */
+#icon-bar {
+  background: #252526;
+  border-right: 1px solid #3c3c3c;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding-top: 8px;
+  gap: 4px;
+  z-index: 2;
+  flex-shrink: 0;
+}
+
+.icon-btn {
+  width: 44px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-left: 2px solid transparent;
+  color: #808080;
+  font-size: 20px;
+  border-radius: 0 6px 6px 0;
+  cursor: pointer;
+  transition: color 0.1s, background 0.1s;
+  flex-shrink: 0;
+}
+.icon-btn:hover { background: #2d2d2d; color: #d4d4d4; }
+.icon-btn.active { color: #d4d4d4; border-left-color: #569cd6; background: #37373d; }
+
+/* ── Side panel (320px when open) ────────────────────────────────── */
+#panel {
+  background: #252526;
+  border-right: 1px solid #3c3c3c;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-width: 0;
+}
+
+.panel-hdr {
+  font-size: 10px;
+  font-weight: 700;
+  color: #bbb;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  padding: 9px 12px 7px;
+  border-bottom: 1px solid #3c3c3c;
+  flex-shrink: 0;
+}
+
+#panel-body {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 4px;
+}
+
+#file-viewer {
+  border-top: 1px solid #3c3c3c;
+  flex-shrink: 0;
+  max-height: 50%;
+  overflow-y: auto;
+}
+
+.fv-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  border-bottom: 1px solid #3c3c3c;
+}
+.fv-header button {
+  background: none; border: none; color: #808080;
+  cursor: pointer; font-size: 14px; padding: 2px 6px;
+  border-radius: 3px;
+}
+.fv-header button:hover { color: #d4d4d4; background: #3c3c3c; }
+
+.fv-code {
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-size: 11px;
+  background: #1e1e1e;
+  color: #d4d4d4;
+  padding: 8px 10px;
+  overflow: auto;
+  white-space: pre;
+  margin: 0;
+}
+
+/* Panel list buttons */
+.p-btn {
+  display: block;
+  width: 100%;
+  padding: 5px 8px;
+  background: transparent;
+  color: #d4d4d4;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  text-align: left;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: inherit;
+}
+.p-btn:hover { background: #2a2d2e; }
+.p-btn:disabled { opacity: 0.45; cursor: default; }
+
+/* File row with action buttons */
+.file-row {
+  display: flex;
+  align-items: center;
+  border-radius: 4px;
+  gap: 2px;
+  padding: 1px 2px;
+}
+.file-row:hover { background: #2a2d2e; }
+.file-row:hover .file-actions { opacity: 1; }
+.file-name {
+  flex: 1;
+  padding: 4px 6px;
+  cursor: pointer;
+  font-size: 12px;
+  color: #d4d4d4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border: none;
+  background: none;
+  text-align: left;
+  font-family: inherit;
+  border-radius: 3px;
+  min-width: 0;
+}
+.file-actions {
+  display: flex;
+  gap: 1px;
+  opacity: 0;
+  flex-shrink: 0;
+  transition: opacity 0.1s;
+}
+.file-act-btn {
+  background: none;
+  border: none;
+  color: #808080;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 3px 5px;
+  border-radius: 3px;
+  line-height: 1;
+}
+.file-act-btn:hover { background: #3c3c3c; color: #d4d4d4; }
+.file-act-btn.del:hover { background: #5f1f1f; color: #f48771; }
+
+.p-section {
+  font-size: 10px;
+  color: #808080;
+  text-transform: uppercase;
+  letter-spacing: 0.7px;
+  padding: 6px 8px 2px;
+}
+
+.p-divider { border: none; border-top: 1px solid #3c3c3c; margin: 5px 0; }
+
+/* Activity items */
+.act-item {
+  font-size: 11px;
+  border-left: 2px solid #3c3c3c;
+  padding: 2px 6px;
+  margin: 2px 0;
+}
+.act-name  { color: #dcdcaa; }
+.act-det   { color: #808080; font-size: 10px; display: block; margin-top: 1px; }
+.act-ts    { color: #555; font-size: 10px; display: block; }
+.act-details { margin-top: 3px; color: #9cdcfe; font-size: 10px; }
+.act-details summary { cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.act-args { margin: 3px 0 1px; color: #b5cea8; font: 10px/1.35 'SF Mono', 'Fira Code', monospace; white-space: pre-wrap; word-break: break-word; }
+.act-phase { color: #808080; font-size: 11px; padding: 2px 6px; }
+.act-sep   { border-top: 1px solid #3c3c3c; margin: 4px 2px; }
+
+/* File attachment */
+#file-badge {
+  display: none; align-items: center; gap: 6px;
+  padding: 4px 10px; background: #252526; border-top: 1px solid #3c3c3c;
+  color: #9cdcfe; font-size: 11px;
+}
+#file-badge-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#file-badge-remove { border: 0; background: none; color: #808080; cursor: pointer; font-size: 14px; }
+#file-badge-remove:hover { color: #f48771; }
+#attach-btn { border: 1px solid #454545; background: #2d2d2d; color: #d4d4d4; border-radius: 4px; padding: 5px 8px; cursor: pointer; }
+#attach-btn:hover, #attach-btn:focus { background: #3c3c3c; }
+
+/* History items */
+.hist-details {
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  margin-bottom: 3px;
+  background: #2a2a2a;
+}
+.hist-details summary {
+  padding: 5px 8px;
+  cursor: pointer;
+  font-size: 11px;
+  color: #ccc;
+  list-style: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  user-select: none;
+}
+.hist-details summary:hover { background: #333; border-radius: 4px; }
+.hist-details[open] summary { border-bottom: 1px solid #3c3c3c; }
+.hist-body { padding: 8px; font-size: 12px; }
+.hist-lbl  { color: #808080; font-size: 10px; text-transform: uppercase; margin-bottom: 3px; }
+.hist-txt  { white-space: pre-wrap; word-break: break-word; color: #d4d4d4; }
+
+/* ── Chat area ────────────────────────────────────────────────────── */
+#chat {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  height: 100vh;
+  background: #1e1e1e;
+}
+
+/* Header */
+#header {
+  padding: 7px 16px 6px;
+  border-bottom: 1px solid #3c3c3c;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-shrink: 0;
+}
+#hdr-title { font-weight: 700; font-size: 13px; white-space: nowrap; }
+#hdr-sub   { font-size: 10px; color: #5a5a5a; }
+#badges    { display: flex; gap: 5px; align-items: center; flex-wrap: wrap; }
+
+.badge {
+  font-size: 11px;
+  padding: 2px 9px;
+  border-radius: 10px;
+  color: #5a5a5a;
+  white-space: nowrap;
+}
+
+.srv-btn {
+  font-size: 11px;
+  padding: 2px 9px;
+  border-radius: 10px;
+  white-space: nowrap;
+  border: 1px solid #3a3a3a;
+  background: #1e1e1e;
+  color: #ccc;
+  cursor: pointer;
+}
+.srv-btn:disabled { cursor: default; opacity: 0.6; }
+.srv-btn-on  { border-color: #2d6a4f; color: #4ec9b0; }
+.srv-btn-off { border-color: #6a2d2d; color: #f48771; }
+
+/* Messages */
+#messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 16px 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.msg { display: flex; max-width: 100%; }
+
+.msg-user      { justify-content: flex-end; }
+.msg-assistant { justify-content: flex-start; }
+
+.msg-body {
+  display: flex;
+  flex-direction: column;
+  max-width: 78%;
+  min-width: 0;
+}
+.msg-user .msg-body      { align-items: flex-end; }
+.msg-assistant .msg-body { align-items: flex-start; }
+
+.msg-label {
+  font-size: 11px;
+  font-weight: 700;
+  margin-bottom: 4px;
+  letter-spacing: 0.3px;
+}
+.msg-user .msg-label      { color: #569cd6; }
+.msg-assistant .msg-label { color: #4ec9b0; }
+
+.msg-content {
+  line-height: 1.65;
+  word-break: break-word;
+  color: #d4d4d4;
+  padding: 8px 12px;
+  border-radius: 4px;
+}
+.msg-user .msg-content {
+  background: #1a3048;
+  border: 1px solid #2d5070;
+  border-radius: 12px 2px 12px 12px;
+  text-align: left;
+}
+.msg-assistant .msg-content {
+  background: #252526;
+  border: 1px solid #3c3c3c;
+  border-radius: 2px 12px 12px 12px;
+}
+.msg-content p  { margin-bottom: 5px; }
+.msg-content p:last-child { margin-bottom: 0; }
+.msg-content code {
+  background: #2d2d2d;
+  color: #ce9178;
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 12px;
+}
+.msg-content pre {
+  background: #252526;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  margin: 6px 0;
+}
+.msg-content pre code { background: none; padding: 0; color: #d4d4d4; }
+.msg-content h1,.msg-content h2,.msg-content h3 {
+  color: #e0e0e0; margin: 8px 0 4px; font-weight: 600;
+}
+.msg-content ul,.msg-content ol { padding-left: 20px; margin: 4px 0; }
+.msg-content li { margin-bottom: 2px; }
+.msg-content a  { color: #569cd6; }
+.msg-content a.local-path {
+  color: #4ec9b0;
+  text-decoration-style: dashed;
+}
+.msg-content a.local-path:hover { color: #7ee0ca; }
+.msg-content hr { border-color: #3c3c3c; margin: 8px 0; }
+.msg-content blockquote {
+  border-left: 3px solid #569cd6;
+  padding-left: 10px;
+  color: #9a9a9a;
+  margin: 4px 0;
+}
+.msg-content table { border-collapse: collapse; margin: 6px 0; font-size: 12px; }
+.msg-content th,.msg-content td { border: 1px solid #3c3c3c; padding: 4px 8px; }
+.msg-content th { background: #2d2d2d; }
+
+.msg-system {
+  text-align: center;
+  color: #808080;
+  font-size: 11px;
+  padding: 2px 0;
+  white-space: pre-wrap;
+}
+
+.cursor { color: #569cd6; animation: blink 0.9s step-end infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+
+/* Phase / spinner bar */
+#phase-bar {
+  padding: 3px 16px 2px;
+  font-size: 12px;
+  color: #4ec9b0;
+  flex-shrink: 0;
+  min-height: 0;
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height 0.1s;
+}
+#phase-bar.visible { max-height: 60px; }
+
+/* Input area */
+#input-area {
+  padding: 8px 16px 6px;
+  border-top: 1px solid #3c3c3c;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+#input {
+  flex: 1;
+  background: #3c3c3c;
+  border: 1px solid #454545;
+  border-radius: 6px;
+  color: #d4d4d4;
+  padding: 8px 12px;
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+  caret-color: #569cd6;
+  transition: border-color 0.15s;
+}
+#input:focus     { border-color: #569cd6; }
+#input:disabled  { opacity: 0.45; cursor: not-allowed; }
+#input::placeholder { color: #666; }
+
+#send-btn {
+  padding: 8px 14px;
+  background: #1e3a52;
+  border: 1px solid #2d6a9f;
+  color: #569cd6;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  font-family: inherit;
+  white-space: nowrap;
+  transition: background 0.1s;
+}
+#send-btn:hover   { background: #264d70; }
+#send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+#stop-btn {
+  padding: 8px 14px;
+  background: #4a1e1e;
+  border: 1px solid #9f4040;
+  color: #f48771;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  font-family: inherit;
+  white-space: nowrap;
+  transition: background 0.1s;
+}
+#stop-btn:hover   { background: #632626; }
+#stop-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* Context bar */
+#ctx-bar {
+  padding: 3px 16px 4px;
+  font-size: 11px;
+  color: #808080;
+  border-top: 1px solid #3c3c3c;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+#ctx-track {
+  width: 100px;
+  height: 3px;
+  background: #3c3c3c;
+  border-radius: 2px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+#ctx-fill {
+  height: 100%;
+  border-radius: 2px;
+  background: #4ec9b0;
+  width: 0%;
+  transition: width 0.4s, background 0.3s;
+}
+
+/* Command autocomplete dropdown */
+#cmd-picker {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  left: 0; right: 0;
+  background: #252526;
+  border: 1px solid #454545;
+  border-radius: 6px;
+  box-shadow: 0 -4px 16px rgba(0,0,0,0.5);
+  z-index: 50;
+  overflow: hidden;
+  display: none;
+}
+#cmd-picker.show { display: block; }
+
+.cp-item {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 7px 12px;
+  cursor: pointer;
+  border-left: 2px solid transparent;
+  transition: background 0.08s;
+}
+.cp-item:hover, .cp-item.active {
+  background: #2a2d2e;
+  border-left-color: #569cd6;
+}
+.cp-name { color: #569cd6; font-size: 13px; font-weight: 600; white-space: nowrap; }
+.cp-desc { color: #808080; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Reconnect banner */
+#banner {
+  display: none;
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  background: #5f1f1f;
+  color: #f48771;
+  text-align: center;
+  padding: 5px;
+  font-size: 12px;
+  z-index: 999;
+}
+#banner.show { display: block; }
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #3c3c3c; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #4a4a4a; }
+</style>
+</head>
+<body>
+
+<div id="banner">⚠ ไม่สามารถเชื่อมต่อ agent server — กำลัง reconnect…</div>
+
+<div id="app">
+
+  <!-- ── Icon bar ───────────────────────────────────────────────── -->
+  <div id="icon-bar">
+    <button class="icon-btn" data-panel="files"    title="Workspace (📁)" onclick="togglePanel('files')">📁</button>
+    <button class="icon-btn" data-panel="activity" title="Activity (⚡)"  onclick="togglePanel('activity')">⚡</button>
+    <button class="icon-btn" data-panel="history"  title="History (🕐)"  onclick="togglePanel('history')">🕐</button>
+    <button class="icon-btn" data-panel="commands" title="Commands (📋)" onclick="togglePanel('commands')">📋</button>
+  </div>
+
+  <!-- ── Side panel ────────────────────────────────────────────── -->
+  <div id="panel">
+    <div class="panel-hdr" id="panel-title"></div>
+    <div id="panel-body"></div>
+    <div id="file-viewer" style="display:none"></div>
+  </div>
+
+  <!-- ── Chat ──────────────────────────────────────────────────── -->
+  <div id="chat">
+
+    <div id="header">
+      <div>
+        <div id="hdr-title">ENDEAVOR AGENT LITE</div>
+        <div id="hdr-sub">
+          Local-only browser UI · RAG + tools
+        </div>
+      </div>
+      <div id="badges"></div>
+    </div>
+
+    <div id="messages"></div>
+
+    <div id="phase-bar"></div>
+
+    <div id="file-badge">
+      <span>📎</span><span id="file-badge-name"></span>
+      <button id="file-badge-remove" title="ลบไฟล์ที่แนบ" onclick="setAttachment(null)">✕</button>
+    </div>
+    <div id="input-area" style="position:relative">
+      <div id="cmd-picker"></div>
+      <input id="file-input" type="file" hidden>
+      <input id="input" type="text"
+        placeholder="พิมพ์ข้อความ… (/ สำหรับคำสั่ง)"
+        autocomplete="off">
+      <button id="attach-btn" type="button" title="แนบไฟล์" onclick="chooseAttachment()">📎</button>
+      <button id="send-btn" onclick="doSend()">ส่ง ↵</button>
+      <button id="stop-btn" type="button" style="display:none" onclick="stopTurn()">⏹ หยุด</button>
+    </div>
+
+    <div id="ctx-bar">
+      <div id="ctx-track"><div id="ctx-fill"></div></div>
+      <span id="ctx-text">CTX 0%</span>
+    </div>
+
+  </div><!-- #chat -->
+</div><!-- #app -->
+
+<script>
+'use strict';
+
+// ── Config ────────────────────────────────────────────────────────────────────
+const WS_URI         = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
+const CTX_MAX_DEF    = 20000;
+const MAX_ACT        = 500;
+// Chat DOM scrollback cap (2026-07-25, PLAN.md §9.5): #messages grows one
+// node per turn with no cap, unlike MAX_ACT above -- unbounded for the
+// lifetime of the browser tab, independent of agent.py's own server-side
+// history trim (that only bounds what's sent to the model, not what the
+// tab keeps rendered). Oldest nodes are dropped past this count; it only
+// trims the visible scrollback, never the model's context.
+const MAX_DOM_MESSAGES = 50;
+const SPINNER        = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏'];
+const FN_ICONS       = {clear:'🗑', history:'🕐', index:'🔎'};
+
+if (window.marked) marked.setOptions({gfm: true, breaks: true});
+
+// ── State ─────────────────────────────────────────────────────────────────────
+const S = {
+  ws: null, token: '', connected: false,
+  reconnectTimer: null, spinTimer: null, spinTick: 0,
+
+  // Server info
+  model: '', serverUp: false, serverPort: 8090, online: false,
+  serverBusy: false, serverPollTimer: null,
+  skill: '', skills: [], builtinCmds: [],
+
+  // Files
+  files: [], filesTruncated: false, filesLimit: 0, currentPath: '', rootPath: '', openFile: null,
+
+  // Context
+  ctxChars: 0, ctxMax: CTX_MAX_DEF,
+
+  // History
+  histPairs: null, histTotal: 0, histLoading: false,
+
+  // Run state
+  busy: false, panelView: null,
+  activity: [], streamEl: null, streamBuf: [],
+  attachment: null,
+  showStream: true,   // false while tools executing, true for direct/synthesis
+
+  // Phase spinner labels
+  phase: 'thinking…', phaseSub: '',
+};
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function esc(s) {
+  return String(s ?? '')
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function stripThink(text) {
+  // Remove complete <think>...</think> blocks (Qwen3 reasoning tokens)
+  let s = text.replace(/<think>[\s\S]*?<\/think>/g, '');
+  // Remove incomplete <think> block still being streamed
+  const open = s.lastIndexOf('<think>');
+  if (open !== -1) s = s.slice(0, open);
+
+  // Remove tool call lines with args: [name(args)] — not markdown [text](url)
+  // [^\]]* matches args that may contain ) e.g. [web_search(query="foo(bar)")]
+  s = s.replace(/\[[a-zA-Z_]\w*\([^\]]*\)\](?!\()/g, '');
+  // Remove bare zero-arg tool-call echoes: [workspace_ls], [scratch_read], [scratch_clear]
+  // (deliberately a small known list, not a generic [a-zA-Z_]\w*] match — the latter
+  // would also strip legitimate bracket text like [note]/[error]/[TODO])
+  s = s.replace(/\[(workspace_ls|scratch_read|scratch_clear)\](?!\()/g, '');
+  // Remove trailing incomplete tool call still being streamed ([name( but no closing )])
+  const lastBracket = s.search(/\[[a-zA-Z_]\w*\([^\]]*$/);
+  if (lastBracket !== -1 && s.indexOf(')]', lastBracket) === -1)
+    s = s.slice(0, lastBracket);
+
+  return s.trimStart();
+}
+
+function md(text) {
+  // Agent/tool output remains escaped text.  Link markup is generated only
+  // from the escaped string below, so a hostile web result cannot inject
+  // executable HTML into this local UI.
+  return `<pre style="white-space:pre-wrap;font-family:inherit">${linkify(esc(text))}</pre>`;
+}
+
+function trimLinkPunctuation(value) {
+  return value.replace(/[),.;:!?]+$/, '');
+}
+
+function trimLocalPathSuffix(value) {
+  return value.replace(/[`*]+$/, '').replace(/[\]\),.;:!?]+$/, '');
+}
+
+function externalLink(url, label = url) {
+  return `<a href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>`;
+}
+
+function localPathLink(path) {
+  // The data value is encoded before insertion into an attribute; the visible
+  // path remains HTML-escaped by the caller.  A click asks the local backend
+  // to reveal the existing, non-sensitive path in Finder.
+  const decoder = document.createElement('textarea');
+  decoder.innerHTML = path;
+  return `<a class="local-path" href="#" data-local-path="${encodeURIComponent(decoder.value)}" title="เปิดใน Finder">${path}</a>`;
+}
+
+function linkify(escapedText) {
+  const saved = [];
+  const hold = html => {
+    const marker = `\u0000LITE_LINK_${saved.length}\u0000`;
+    saved.push(html);
+    return marker;
+  };
+
+  // Support the Markdown links agents commonly emit even though Lite renders
+  // all other Markdown as literal, safely escaped text.
+  let html = escapedText.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s<]+)\)/g, (_all, label, rawUrl) => {
+    const url = trimLinkPunctuation(rawUrl);
+    return url ? hold(externalLink(url, label)) : _all;
+  });
+  html = html.replace(/https?:\/\/[^\s<]+/g, rawUrl => {
+    const url = trimLinkPunctuation(rawUrl);
+    return url ? hold(externalLink(url)) + rawUrl.slice(url.length) : rawUrl;
+  });
+  // Agent Lite runs on macOS: absolute paths and ~/ paths are the useful
+  // forms emitted by its local tools.  Newlines delimit paths; spaces are
+  // allowed because Finder paths regularly contain them.
+  html = html.replace(/(?:~\/|\/(?:Users|private|tmp|var|Volumes)\/)[^\n<>"'`*\]]+/g, rawPath => {
+    const path = trimLocalPathSuffix(rawPath);
+    return path ? hold(localPathLink(path)) + rawPath.slice(path.length) : rawPath;
+  });
+  return html.replace(/\u0000LITE_LINK_(\d+)\u0000/g, (_all, index) => saved[Number(index)]);
+}
+
+function ts() {
+  const d = new Date();
+  return [d.getHours(), d.getMinutes(), d.getSeconds()]
+    .map(n => n.toString().padStart(2,'0')).join(':');
+}
+
+function fmtTs(unix) {
+  if (!unix) return '';
+  const diff = (Date.now() - unix*1000) / 60000;
+  if (diff < 1)    return 'เมื่อกี้';
+  if (diff < 60)   return `${Math.floor(diff)} นาทีที่แล้ว`;
+  if (diff < 1440) return `${Math.floor(diff/60)} ชม.ที่แล้ว`;
+  if (diff < 10080) return `${Math.floor(diff/1440)} วันที่แล้ว`;
+  const d = new Date(unix*1000);
+  return `${d.getDate()}/${d.getMonth()+1} ${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}`;
+}
+
+function fileIcon(name) {
+  const ext = name.split('.').pop().toLowerCase();
+  return ({py:'🐍',js:'📜',ts:'📜',json:'📋',md:'📝',csv:'📊',txt:'📄',
+           pdf:'📕',sh:'⚙',yml:'⚙',yaml:'⚙',toml:'⚙',html:'🌐',css:'🎨',
+           png:'🖼',jpg:'🖼',jpeg:'🖼',gif:'🖼',svg:'🖼',webp:'🖼'})[ext] || '📄';
+}
+
+function scrollDown() {
+  const el = document.getElementById('messages');
+  el.scrollTop = el.scrollHeight;
+}
+
+$('messages').addEventListener('click', event => {
+  const link = event.target.closest('a.local-path');
+  if (!link) return;
+  event.preventDefault();
+  const path = decodeURIComponent(link.dataset.localPath || '');
+  if (path && S.ws && S.ws.readyState === WebSocket.OPEN)
+    S.ws.send(JSON.stringify({type:'reveal_path', path}));
+});
+
+function $(id) { return document.getElementById(id); }
+
+// ── WebSocket ─────────────────────────────────────────────────────────────────
+async function init() {
+  try {
+    const r = await fetch('/ui-token');
+    const d = await r.json();
+    S.token = d.token || '';
+  } catch(e) { S.token = ''; }
+  connect();
+}
+
+function connect() {
+  if (S.reconnectTimer) { clearTimeout(S.reconnectTimer); S.reconnectTimer = null; }
+  try {
+    S.ws = S.token ? new WebSocket(WS_URI, [S.token]) : new WebSocket(WS_URI);
+    S.ws.onopen    = onOpen;
+    S.ws.onmessage = e => onEvent(JSON.parse(e.data));
+    S.ws.onclose   = onClose;
+    S.ws.onerror   = () => {};
+  } catch(e) { scheduleReconnect(); }
+}
+
+function send(obj) {
+  if (S.ws && S.ws.readyState === WebSocket.OPEN)
+    S.ws.send(JSON.stringify(obj));
+}
+
+function onOpen() {
+  S.connected = true;
+  $('banner').classList.remove('show');
+  updateHeader();
+}
+
+function onClose() {
+  S.connected = false;
+  S.serverUp  = false;
+  updateHeader();
+  $('banner').classList.add('show');
+  scheduleReconnect();
+}
+
+function scheduleReconnect() {
+  if (!S.reconnectTimer)
+    S.reconnectTimer = setTimeout(connect, 3000);
+}
+
+// ── Event handler ──────────────────────────────────────────────────────────────
+function onEvent(ev) {
+  const t = ev.type;
+
+  if (t === 'status') {
+    S.serverUp = ev.server_up; S.serverPort = ev.server_port || 8090;
+    S.online = ev.online === true;
+    S.ctxChars = ev.history_chars || 0;
+    S.ctxMax = ev.history_max_chars || CTX_MAX_DEF;
+    S.skill = ev.skill || ''; S.skills = ev.skills || [];
+    S.builtinCmds = ev.builtin_cmds || []; S.model = ev.model || '';
+    updateHeader();
+    if (S.panelView === 'commands') renderPanel();
+
+  } else if (t === 'files') {
+    if (ev.deleted && S.openFile && S.openFile.path === ev.deleted) S.openFile = null;
+    S.files = ev.files || [];
+    S.filesTruncated = ev.truncated === true;
+    S.filesLimit = ev.limit || 0;
+    S.currentPath = ev.path || '';
+    if (!S.rootPath) S.rootPath = ev.root || ev.path || '';
+    if (S.panelView === 'files') renderPanel();
+
+  } else if (t === 'file_content') {
+    S.openFile = {path: ev.path, content: ev.content, isImage: false};
+    if (S.panelView === 'files') renderPanel();
+
+  } else if (t === 'file_image') {
+    S.openFile = {path: ev.path, content: '', isImage: true, dataUrl: ev.data_url};
+    if (S.panelView === 'files') renderPanel();
+
+  } else if (t === 'open_with_os_ok') {
+    /* silent — OS opens the app */
+
+  } else if (t === 'clear_ok') {
+    stopSpinner();
+    S.ctxChars = 0; updateCtx();
+    appendSystem('✓ Conversation cleared');
+
+  } else if (t === 'ctx_update') {
+    S.ctxChars = ev.chars || 0;
+    S.ctxMax   = ev.max_chars || CTX_MAX_DEF;
+    updateCtx();
+
+  } else if (t === 'compact_result') {
+    stopSpinner();
+    if (ev.error) {
+      appendSystem(`⚠ /compact error: ${ev.error}`);
+    } else {
+      appendSystem(`✓ Compacted — removed ${ev.cut} messages (${(ev.before||0).toLocaleString()} → ${(ev.after||0).toLocaleString()} chars)`);
+    }
+
+  } else if (t === 'memory_ok') {
+    stopSpinner();
+    const topics = (ev.topics || '').trim() || '–';
+    appendSystem(`📚 History: ${ev.turns} turns / ${(ev.total||0).toLocaleString()} chars\n${topics}`);
+
+  } else if (t === 'history_list') {
+    S.histPairs = ev.pairs || []; S.histTotal = ev.total || 0;
+    S.histLoading = false;
+    if (S.panelView === 'history') renderPanel();
+
+  } else if (t === 'skill_change') {
+    stopSpinner();
+    S.skill = ev.skill || ''; updateHeader();
+    if (ev.msg) appendSystem(`⚡ ${ev.msg}`);
+    if (S.panelView === 'commands') renderPanel();
+
+  } else if (t === '_disconnect') {
+    S.serverUp = false; updateHeader();
+
+  // ── Streaming ──────────────────────────────────────────────────
+  } else if (t === 'start') {
+    S.busy = true; S.streamBuf = []; S.showStream = true;
+    updateInput(); startSpinner('thinking…');
+    // Create streaming message bubble
+    const wrap = document.createElement('div');
+    wrap.className = 'msg msg-assistant';
+    wrap.innerHTML = `<div class="msg-body"><div class="msg-label">${esc(S.skill ? `Agent | ${S.skill}` : 'Agent')}</div><div class="msg-content"></div></div>`;
+    $('messages').appendChild(wrap);
+    trimMessageLog();
+    S.streamEl = wrap.querySelector('.msg-content');
+    scrollDown();
+
+  } else if (t === 'busy') {
+    // Command flows (e.g. /index) that already set their own spinner label
+    // via runCmd/doSend -- just gate the input, don't touch phase/bubble.
+    S.busy = true; updateInput();
+
+  } else if (t === 'phase') {
+    S.phase = ev.label || S.phase; S.phaseSub = '';
+    if (ev.label) { S.activity.push({kind:'phase', name:ev.label, detail:'', ts:ts()}); }
+    if (S.panelView === 'activity') renderPanel();
+
+  } else if (t === 'progress') {
+    S.phaseSub = ev.msg || '';
+
+  } else if (t === 'tool') {
+    S.activity.push({kind:'tool', name:ev.name||'', args:ev.args||{}, detail:ev.detail||'', ts:ts()});
+    if (S.activity.length > MAX_ACT) S.activity = S.activity.slice(-MAX_ACT);
+    if (S.panelView === 'activity') renderPanel();
+
+  } else if (t === 'plan') {
+    const steps = ev.steps || [];
+    if (steps.length && S.streamEl) {
+      const planMd = `**📋 Plan:**\n\n${steps.map((s,i)=>`${i+1}. ${s}`).join('\n')}\n\n---`;
+      S.streamEl.innerHTML = md(planMd);
+    }
+
+  } else if (t === 'synthesis_start') {
+    S.showStream = true;
+    if (S.streamEl && S.streamBuf.length) {
+      const visible = stripThink(S.streamBuf.join(''));
+      S.streamEl.innerHTML = (visible ? md(visible) : '') + '<span class="cursor">▋</span>';
+      scrollDown();
+    }
+
+  } else if (t === 'token') {
+    S.streamBuf.push(ev.text || '');
+    if (S.showStream && S.streamEl) {
+      const visible = stripThink(S.streamBuf.join(''));
+      S.streamEl.innerHTML = (visible ? md(visible) : '') + '<span class="cursor">▋</span>';
+      scrollDown();
+    }
+
+  } else if (t === 'discard_stream') {
+    S.showStream = false;
+    S.streamBuf = [];
+    if (S.streamEl) S.streamEl.innerHTML = '';
+
+  } else if (t === 'response') {
+    if (S.streamEl) { S.streamEl.innerHTML = md(stripThink(ev.content || '')); }
+    S.streamBuf = [];
+
+  } else if (t === 'done') {
+    stopSpinner(); S.busy = false; S.histPairs = null;
+    updateInput();
+    S.activity.push({kind:'sep', name:'', detail:'', ts:''});
+    if (S.panelView === 'activity') renderPanel();
+    scrollDown();
+
+  } else if (t === 'error') {
+    stopSpinner();
+    if (S.streamEl)
+      S.streamEl.innerHTML = `<span style="color:#f48771">❌ ${esc(ev.msg||'error')}</span>`;
+    else
+      appendSystem(`❌ ${ev.msg || 'error'}`);
+    S.busy = false; updateInput();
+
+  } else if (t === 'cancelled') {
+    stopSpinner();
+    if (S.streamEl)
+      S.streamEl.innerHTML = '<span style="color:#808080">✕ ยกเลิกแล้ว</span>';
+    S.busy = false; updateInput();
+  }
+}
+
+// ── UI: Header + badges ────────────────────────────────────────────────────────
+function updateHeader() {
+  const raw   = S.model || '–';
+  const short = raw.includes('/') ? raw.split('/').pop() : raw;
+  const disp  = short.length > 36 ? short.slice(0,33)+'…' : short;
+
+  const srvTxt = S.serverUp ? `MLX :${S.serverPort}` : `MLX :${S.serverPort} ✗`;
+  const netTxt = S.online ? 'Internet' : 'Offline';
+
+  const pct    = S.ctxMax ? Math.min(S.ctxChars/S.ctxMax, 1) : 0;
+  const ctxPct = Math.round(pct*100);
+
+  const srvBtnLabel = S.serverBusy ? '…' : (S.serverUp ? '⏹ ปิด' : '▶ เปิด');
+  const srvBtnClass = S.serverUp ? 'srv-btn srv-btn-on' : 'srv-btn srv-btn-off';
+
+  let html =
+    `<span class="badge">${esc(disp)}</span>` +
+    `<span class="badge">${srvTxt}</span>` +
+    `<button class="${srvBtnClass}" ${S.serverBusy ? 'disabled' : ''} onclick="toggleMlxServer()" title="เปิด/ปิด mlx_vlm.server">${srvBtnLabel}</button>` +
+    `<span class="badge">${netTxt}</span>` +
+    `<span class="badge">CTX ${ctxPct}%</span>`;
+
+  if (S.skill)
+    html += `<span class="badge" style="font-weight:700">${esc(S.skill)}</span>`;
+
+  $('badges').innerHTML = html;
+}
+
+// ── mlx_vlm.server start/stop ────────────────────────────────────────────────
+async function toggleMlxServer() {
+  if (S.serverBusy) return;
+  const turningOn = !S.serverUp;
+  S.serverBusy = true;
+  updateHeader();
+  try {
+    const res  = await fetch(turningOn ? '/server/start' : '/server/stop', {method: 'POST'});
+    const data = await res.json();
+    if (!res.ok || !data.ok) throw new Error(data.error || 'ทำรายการไม่สำเร็จ');
+    pollMlxServerStatus(turningOn);
+  } catch (error) {
+    S.serverBusy = false;
+    updateHeader();
+    appendSystem(`⚠ ${turningOn ? 'เปิด' : 'ปิด'} MLX server ไม่สำเร็จ: ${error.message || error}`);
+  }
+}
+
+function pollMlxServerStatus(waitForUp) {
+  if (S.serverPollTimer) clearInterval(S.serverPollTimer);
+  const deadline = Date.now() + (waitForUp ? 90_000 : 15_000);
+  S.serverPollTimer = setInterval(async () => {
+    let up = null;
+    try {
+      const res  = await fetch('/server/status');
+      const data = await res.json();
+      up = !!data.server_up;
+    } catch (error) {
+      // transient fetch failure -- keep polling until the deadline
+    }
+    const reached = up !== null && up === waitForUp;
+    if (reached || Date.now() > deadline) {
+      clearInterval(S.serverPollTimer);
+      S.serverPollTimer = null;
+      S.serverBusy = false;
+      if (up !== null) S.serverUp = up;
+      updateHeader();
+      if (!reached)
+        appendSystem(`⚠ MLX server ${waitForUp ? 'ยังไม่ขึ้น' : 'ยังไม่ปิด'}สนิทภายในเวลาที่รอ — ลองเช็คสถานะอีกครั้ง`);
+    } else {
+      updateHeader();
+    }
+  }, 2000);
+}
+
+function updateCtx() {
+  const pct = S.ctxMax ? Math.min(S.ctxChars/S.ctxMax, 1) : 0;
+  const pctI = Math.round(pct*100);
+  const col  = pct > 0.9 ? '#f48771' : pct > 0.7 ? '#dcb67a' : '#4ec9b0';
+  $('ctx-fill').style.width      = (pct*100)+'%';
+  $('ctx-fill').style.background = col;
+  $('ctx-text').textContent = `CTX ${pctI}%  ${S.ctxChars.toLocaleString()} / ${S.ctxMax.toLocaleString()} chars`;
+  updateHeader();
+}
+
+function updateInput() {
+  $('input').disabled    = S.busy;
+  $('send-btn').disabled = S.busy;
+  $('send-btn').style.display = S.busy ? 'none' : '';
+  $('stop-btn').style.display = S.busy ? '' : 'none';
+  if (S.busy) $('stop-btn').disabled = false;  // re-enable for the new turn
+}
+
+function stopTurn() {
+  if (!S.busy) return;
+  send({type: 'command', cmd: '/stop'});
+  // '/stop' is handled by the WS reader before the turn's next checkpoint,
+  // which can take a moment (mid tool call). No server round-trip confirms
+  // receipt (see 'cancelled' handler for the real confirmation), so
+  // acknowledge the click immediately or it looks like nothing happened.
+  S.phaseSub = 'กำลังหยุด… รอสักครู่';
+  $('stop-btn').disabled = true;
+}
+
+// ── Spinner ────────────────────────────────────────────────────────────────────
+function startSpinner(label) {
+  S.phase = label; S.phaseSub = '';
+  const bar = $('phase-bar');
+  bar.classList.add('visible');
+  if (S.spinTimer) clearInterval(S.spinTimer);
+  S.spinTimer = setInterval(() => {
+    S.spinTick++;
+    const sp = SPINNER[S.spinTick % SPINNER.length];
+    bar.innerHTML = `${sp} ${esc(S.phase)}`
+      + (S.phaseSub ? `<div style="font-size:11px;color:#808080;padding-left:14px">→ ${esc(S.phaseSub)}</div>` : '');
+  }, 80);
+}
+
+function stopSpinner() {
+  if (S.spinTimer) { clearInterval(S.spinTimer); S.spinTimer = null; }
+  $('phase-bar').classList.remove('visible');
+  $('phase-bar').innerHTML = '';
+}
+
+// ── Messages ───────────────────────────────────────────────────────────────────
+function trimMessageLog() {
+  const box = $('messages');
+  while (box.children.length > MAX_DOM_MESSAGES) box.removeChild(box.firstChild);
+}
+
+function appendSystem(text) {
+  const el = document.createElement('div');
+  el.className = 'msg-system';
+  el.textContent = text;
+  $('messages').appendChild(el);
+  trimMessageLog();
+  scrollDown();
+}
+
+function appendUser(text) {
+  const el = document.createElement('div');
+  el.className = 'msg msg-user';
+  el.innerHTML = `<div class="msg-body"><div class="msg-label">You</div><div class="msg-content">${esc(text)}</div></div>`;
+  $('messages').appendChild(el);
+  trimMessageLog();
+  scrollDown();
+}
+
+// ── Panel toggle ───────────────────────────────────────────────────────────────
+function togglePanel(view) {
+  const app  = $('app');
+  const btns = document.querySelectorAll('.icon-btn');
+
+  if (S.panelView === view) {
+    S.panelView = null;
+    app.classList.remove('panel-open');
+    btns.forEach(b => b.classList.remove('active'));
+  } else {
+    S.panelView = view;
+    app.classList.add('panel-open');
+    btns.forEach(b => b.classList.toggle('active', b.dataset.panel === view));
+    if (view === 'history' && S.histPairs === null && !S.histLoading) {
+      S.histLoading = true;
+      send({type: 'get_history'});
+    }
+    renderPanel();
+  }
+}
+
+// ── Panel renderers ────────────────────────────────────────────────────────────
+const PANEL_TITLES = {
+  files: '📁 Workspace', activity: '⚡ Activity',
+  history: '🕐 History', commands: '📋 Commands',
+};
+
+function renderPanel() {
+  const v = S.panelView;
+  $('panel-title').textContent = PANEL_TITLES[v] || '';
+  if      (v === 'files')    renderFiles();
+  else if (v === 'activity') renderActivity();
+  else if (v === 'history')  renderHistory();
+  else if (v === 'commands') renderCommands();
+}
+
+function renderFiles() {
+  const body = $('panel-body');
+  const dirs  = S.files.filter(f => f.type === 'dir');
+  const flist = S.files.filter(f => f.type === 'file');
+  const cur   = S.currentPath;
+  const root  = S.rootPath;
+
+  let h = '';
+  if (cur) {
+    const rel = root && cur.startsWith(root) ? (cur.slice(root.length).replace(/^\//,'') || '.') : cur;
+    h += `<div style="font-size:11px;color:#808080;padding:4px 8px 2px">📂 ${esc(rel)}</div>`;
+  }
+
+  for (const f of dirs)
+    h += `<button class="p-btn" data-dir="${esc(f.path)}">📁 ${esc(f.name)}</button>`;
+
+  for (const f of flist) {
+    const icon = fileIcon(f.name);
+    const size = f.size > 1024 ? `  ${Math.floor(f.size/1024)}KB` : '';
+    h += `<div class="file-row" data-path="${esc(f.path)}">
+      <button class="file-name" data-action="view" title="${esc(f.path)}">${icon} ${esc(f.name)}${size ? `<span style="color:#808080;font-size:10px"> ${size.trim()}</span>` : ''}</button>
+      <div class="file-actions"><button class="file-act-btn" data-action="view" title="ดู">👁</button></div>
+    </div>`;
+  }
+
+  if (cur && cur !== root) {
+    const parent = cur.split('/').slice(0,-1).join('/') || '/';
+    h += `<button class="p-btn" data-dir="${esc(parent)}">⬆ ..</button>`;
+  }
+
+  if (!S.files.length)
+    h += `<div style="color:#808080;font-size:12px;padding:8px">_(empty workspace)_</div>`;
+  else if (S.filesTruncated)
+    h += `<div style="color:#d7ba7d;font-size:11px;padding:8px">แสดง ${S.filesLimit.toLocaleString()} รายการแรก — ใช้การค้นหาเมื่อต้องการไฟล์ที่เหลือ</div>`;
+
+  body.innerHTML = h;
+
+
+  // File viewer
+  const viewer = $('file-viewer');
+  const of = S.openFile;
+  if (!of) { viewer.style.display = 'none'; return; }
+
+  viewer.style.display = 'block';
+  const fname = of.path.split('/').pop();
+
+  if (of.isImage) {
+    viewer.innerHTML =
+      `<div class="fv-header"><span>${esc(fname)}</span><button onclick="closeFile()">✕</button></div>` +
+      `<img src="${esc(of.dataUrl)}" style="max-width:100%;padding:6px">`;
+  } else {
+    const content = of.content.length > 6000 ? of.content.slice(0,6000)+'\n… (truncated)' : of.content;
+    viewer.innerHTML =
+      `<div class="fv-header"><span>${esc(fname)}</span><button onclick="closeFile()">✕</button></div>` +
+      `<pre class="fv-code">${esc(content)}</pre>`;
+  }
+}
+
+function renderActivity() {
+  const body = $('panel-body');
+  const acts = S.activity.slice(-100);
+  if (!acts.length) {
+    body.innerHTML = '<div style="color:#808080;font-size:12px;padding:8px">_(no activity yet)_</div>';
+    return;
+  }
+  let h = '';
+  for (const a of acts) {
+    if (a.kind === 'tool') {
+      const clip = a.detail.length > 80 ? a.detail.slice(0,80)+'…' : a.detail;
+      const args = formatActivityArgs(a.name, a.args);
+      h += `<div class="act-item">🔧 <span class="act-name">${esc(a.name)}</span>` +
+           (clip ? `<span class="act-det">${esc(clip)}</span>` : '') +
+           (args ? `<details class="act-details"><summary>${esc(activityArgsSummary(a.name, a.args))}</summary><pre class="act-args">${esc(args)}</pre></details>` : '') +
+           (a.ts  ? `<span class="act-ts">${esc(a.ts)}</span>` : '') +
+           `</div>`;
+    } else if (a.kind === 'sep') {
+      h += `<div class="act-sep"></div>`;
+    } else if (a.kind === 'phase') {
+      h += `<div class="act-phase">⚡ ${esc(a.name)}</div>`;
+    }
+  }
+  body.innerHTML = h;
+  body.scrollTop = body.scrollHeight;
+}
+
+function formatActivityArgs(name, args) {
+  if (!args || typeof args !== 'object') return '';
+  const rows = Object.entries(args);
+  if (!rows.length) return '';
+  return rows.map(([key, value]) => {
+    const rendered = typeof value === 'string' ? value : JSON.stringify(value);
+    return `${key}: ${rendered}`;
+  }).join('\n');
+}
+
+function activityArgsSummary(name, args) {
+  if (!args || typeof args !== 'object') return 'รายละเอียดคำสั่ง';
+  const value = args.command ?? args.query;
+  if (typeof value === 'string' && value) {
+    const label = Object.hasOwn(args, 'command') ? 'command' : 'query';
+    return `${label}: ${value.replace(/\s+/g, ' ').slice(0, 72)}${value.length > 72 ? '…' : ''}`;
+  }
+  return `arguments: ${Object.keys(args).join(', ')}`;
+}
+
+function renderHistory() {
+  const body = $('panel-body');
+  if (S.histLoading) {
+    body.innerHTML = '<div style="color:#808080;font-size:12px;padding:8px">กำลังโหลด…</div>';
+    return;
+  }
+  const pairs = S.histPairs || [];
+  if (!pairs.length) {
+    body.innerHTML = '<div style="color:#808080;font-size:12px;padding:8px">_(ยังไม่มีประวัติ)_</div>';
+    return;
+  }
+  let h = `<div style="font-size:11px;color:#808080;padding:4px 8px">${S.histTotal.toLocaleString()} รายการ</div>`;
+  for (let i = pairs.length-1; i >= 0; i--) {
+    const p = pairs[i];
+    const q = p.q || ''; const a = p.a || '—';
+    const tsStr = fmtTs(p.ts);
+    const qShort = q.length > 58 ? q.slice(0,58)+'…' : q;
+    const title = `#${i+1} — ${qShort}` + (tsStr ? `  ·  ${tsStr}` : '');
+    h += `<details class="hist-details">
+      <summary title="${esc(q)}">${esc(title)}</summary>
+      <div class="hist-body">
+        <div class="hist-lbl">คำถาม</div>
+        <div class="hist-txt">${esc(q)}</div>
+        <hr style="border:none;border-top:1px solid #3c3c3c;margin:6px 0">
+        <div class="hist-lbl">คำตอบ</div>
+        <div class="hist-txt">${esc(a)}</div>
+      </div>
+    </details>`;
+  }
+  body.innerHTML = h;
+}
+
+function renderCommands() {
+  const body = $('panel-body');
+  const busy = S.busy;
+  const activeSkill = S.skill;
+  let h = `<div class="p-section">COMMANDS</div>`;
+  for (const entry of S.builtinCmds) {
+    const name = entry.name || '';
+    if (name === 'exit' && !activeSkill) continue;
+    if (!['clear','compact','history','exit'].includes(name)) continue;
+    const cmd  = `/${name}`;
+    const icon = FN_ICONS[name] || '⚙';
+    h += `<button class="p-btn" ${busy?'disabled':''} title="${esc(entry.desc||'')}" onclick="runCmd('${cmd}')">${icon} ${cmd}</button>`;
+  }
+  if (S.skills.length) {
+    h += `<hr class="p-divider"><div class="p-section">SKILLS</div>`;
+    for (const entry of S.skills) {
+      const sname = entry.name || '';
+      const cmd   = `/${sname}`;
+      const isAct = activeSkill === sname;
+      h += `<button class="p-btn" ${busy?'disabled':''} title="${esc(entry.desc||'')}" onclick="runCmd('${cmd}')" style="${isAct?'color:#4ec9b0':''}">${isAct?'● ':''}${cmd}</button>`;
+    }
+  } else {
+    h += `<div style="color:#808080;font-size:12px;padding:6px 8px">_(ยังไม่มี skills)_</div>`;
+  }
+  body.innerHTML = h;
+}
+
+// ── Actions ────────────────────────────────────────────────────────────────────
+function goDir(path)   { send({type:'get_files', path}); }
+function goFile(path)  { send({type:'open_file', path}); }
+function closeFile()   { S.openFile = null; if (S.panelView === 'files') renderPanel(); }
+
+function editWithOS(path) { send({type:'open_with_os', path}); }
+
+let _delPending = null;
+function deleteFile(path, btnEl) {
+  if (_delPending && _delPending.path === path) {
+    // second click — confirm delete
+    clearTimeout(_delPending.timer);
+    _delPending = null;
+    if (btnEl) { btnEl.textContent = '🗑'; btnEl.style.background = ''; btnEl.style.color = ''; }
+    send({type:'delete_file', path});
+  } else {
+    // first click — arm
+    if (_delPending) {
+      // reset previous pending
+      clearTimeout(_delPending.timer);
+      if (_delPending.el) { _delPending.el.textContent = '🗑'; _delPending.el.style.background = ''; _delPending.el.style.color = ''; }
+    }
+    if (btnEl) { btnEl.textContent = '?'; btnEl.style.background = '#5f1f1f'; btnEl.style.color = '#f48771'; }
+    _delPending = {
+      path, el: btnEl,
+      timer: setTimeout(() => {
+        if (_delPending && _delPending.path === path) {
+          if (btnEl) { btnEl.textContent = '🗑'; btnEl.style.background = ''; btnEl.style.color = ''; }
+          _delPending = null;
+        }
+      }, 3000)
+    };
+  }
+}
+
+const CMD_SPINNER_LABELS = {'/history':'โหลด history…', '/index':'กำลังสร้าง RAG index…', '/clear':'กำลัง clear…'};
+
+function runCmd(cmd) {
+  appendUser(cmd);
+  startSpinner(CMD_SPINNER_LABELS[cmd] || `${cmd}…`);
+  send({type:'command', cmd});
+}
+
+function doSend() {
+  const input = $('input');
+  const text  = input.value.trim();
+  const attachment = S.attachment;
+  if ((!text && !attachment) || S.busy) return;
+  _hidePicker();
+  input.value = '';
+  const shown = attachment
+    ? (text ? `${text}  📎 ${attachment.name}` : `📎 ${attachment.name}`)
+    : text;
+  appendUser(shown);
+  if (text.startsWith('/')) {
+    const cmd = text.toLowerCase();
+    // '/stop' is a wire-only command consumed by the WS reader and never
+    // gets a reply when idle (nothing to cancel) -- routing it through here
+    // would start a spinner that never stops. stopTurn() no-ops safely.
+    if (cmd === '/stop') { stopTurn(); return; }
+    startSpinner(CMD_SPINNER_LABELS[cmd] || `${cmd}…`);
+    send({type:'command', cmd});
+  } else {
+    const hint = attachment
+      ? (attachment.isImage
+        ? `[ไฟล์แนบ (รูปภาพ): ${attachment.path}]\nใช้ tool: read_image`
+        : `[ไฟล์แนบ: ${attachment.path}]\nใช้ tool: read_file`)
+      : '';
+    setAttachment(null);
+    send({type:'query', content: text ? `${text}\n\n${hint}` : hint,
+      attachment: attachment ? {path: attachment.path, isImage: attachment.isImage} : null});
+  }
+}
+
+function setAttachment(attachment) {
+  S.attachment = attachment;
+  const badge = $('file-badge');
+  const name = $('file-badge-name');
+  if (attachment) {
+    name.textContent = attachment.name;
+    name.title = attachment.name;
+    badge.style.display = 'flex';
+  } else {
+    name.textContent = ''; name.title = '';
+    badge.style.display = 'none';
+  }
+}
+
+function chooseAttachment() {
+  if (!S.busy) $('file-input').click();
+}
+
+$('file-input').addEventListener('change', async e => {
+  const file = e.target.files && e.target.files[0];
+  e.target.value = '';
+  if (!file || S.busy) return;
+  try {
+    const response = await fetch('/upload', {
+      method: 'POST', body: file,
+      headers: {'Content-Type': file.type || 'application/octet-stream', 'X-File-Name': encodeURIComponent(file.name)},
+    });
+    const result = await response.json();
+    if (!response.ok || !result.ok) throw new Error(result.error || 'อัปโหลดไฟล์ไม่สำเร็จ');
+    setAttachment(result);
+  } catch (error) {
+    appendSystem(`⚠ แนบไฟล์ไม่ได้: ${error.message || error}`);
+  }
+});
+
+// ── Command picker ─────────────────────────────────────────────────────────────
+const CP = { items: [], active: -1 };
+
+function _allCmds() {
+  const out = [];
+  for (const c of S.builtinCmds) out.push({name: c.name, desc: c.desc || ''});
+  for (const s of S.skills)      out.push({name: s.name, desc: s.desc || ''});
+  return out;
+}
+
+function _showPicker(query) {
+  const all    = _allCmds();
+  const q      = query.slice(1).toLowerCase();          // strip leading /
+  CP.items     = q ? all.filter(c => c.name.startsWith(q)) : all;
+  CP.active    = CP.items.length ? 0 : -1;
+
+  const picker = $('cmd-picker');
+  if (!CP.items.length) { _hidePicker(); return; }
+
+  picker.innerHTML = CP.items.map((c, i) =>
+    `<div class="cp-item${i === 0 ? ' active' : ''}" data-i="${i}"
+          onmousedown="event.preventDefault();_selectIdx(${i})">
+       <span class="cp-name">/${esc(c.name)}</span>
+       <span class="cp-desc">${esc(c.desc)}</span>
+     </div>`
+  ).join('');
+  picker.classList.add('show');
+}
+
+function _hidePicker() {
+  $('cmd-picker').classList.remove('show');
+  CP.items = []; CP.active = -1;
+}
+
+function _moveActive(delta) {
+  if (!CP.items.length) return;
+  CP.active = (CP.active + delta + CP.items.length) % CP.items.length;
+  $('cmd-picker').querySelectorAll('.cp-item').forEach((el, i) =>
+    el.classList.toggle('active', i === CP.active)
+  );
+}
+
+function _selectIdx(i) {
+  const c = CP.items[i];
+  if (!c) return;
+  _hidePicker();
+  const inp = $('input');
+  inp.value = `/${c.name}`;
+  inp.focus();
+}
+
+// ── Keyboard ───────────────────────────────────────────────────────────────────
+$('input').addEventListener('input', e => {
+  const v = e.target.value;
+  if (v.startsWith('/') && !S.busy) _showPicker(v);
+  else _hidePicker();
+});
+
+$('input').addEventListener('keydown', e => {
+  if (CP.items.length) {
+    if (e.key === 'ArrowUp')   { e.preventDefault(); _moveActive(-1); return; }
+    if (e.key === 'ArrowDown') { e.preventDefault(); _moveActive(+1); return; }
+    if (e.key === 'Tab' || (e.key === 'Enter' && CP.active >= 0)) {
+      e.preventDefault();
+      _selectIdx(CP.active >= 0 ? CP.active : 0);
+      return;
+    }
+    if (e.key === 'Escape') { _hidePicker(); return; }
+  }
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doSend(); }
+});
+
+document.addEventListener('click', e => {
+  if (!$('cmd-picker').contains(e.target) && e.target.id !== 'input') _hidePicker();
+});
+
+// ── Panel-body delegation (files panel) ───────────────────────────────────────
+$('panel-body').addEventListener('click', e => {
+  // File action buttons
+  const btn = e.target.closest('[data-action]');
+  if (btn) {
+    const row = btn.closest('[data-path]');
+    if (!row) return;
+    const path = row.dataset.path;
+    const action = btn.dataset.action;
+    if      (action === 'view') goFile(path);
+    else if (action === 'edit') editWithOS(path);
+    else if (action === 'del')  deleteFile(path, btn);
+    return;
+  }
+  // Dir buttons
+  const dir = e.target.closest('[data-dir]');
+  if (dir) goDir(dir.dataset.dir);
+});
+
+// ── Boot ───────────────────────────────────────────────────────────────────────
+init();
+</script>
+</body>
+</html>

@@ -1,0 +1,22 @@
+# Python build and test artefacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+.coverage
+htmlcov/
+*.egg-info/
+
+# Built locally from helpers/_vision_ocr.swift by the installer and CI
+helpers/vision_ocr_macos
+
+# Local configuration and runtime state
+.env
+data/
+logs/
+workspect/*
+!workspect/.gitkeep
+
+# OS/editor files
+.DS_Store
+.vscode/

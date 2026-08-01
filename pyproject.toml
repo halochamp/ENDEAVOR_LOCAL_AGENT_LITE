@@ -1,0 +1,32 @@
+[project]
+name = "endeavor-agent-lite"
+version = "0.1.0"
+description = "Local-first Thai AI agent for Apple Silicon Macs"
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+license = { file = "LICENSE" }
+dependencies = [
+    "ddgs",
+    "fastapi",
+    "httpx",
+    "langchain-core",
+    "langchain-openai",
+    "langgraph",
+    "mlx-vlm",
+    "numpy",
+    "opencv-python",
+    "openpyxl",
+    "Pillow",
+    "PyMuPDF",
+    "python-docx",
+    "rich",
+    "uvicorn[standard]",
+    "xlrd",
+]
+
+[dependency-groups]
+dev = ["pytest"]
+
+[tool.pytest.ini_options]
+testpaths = ["test_suite"]
+addopts = "-q"
