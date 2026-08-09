@@ -22,6 +22,7 @@ import time
 from pathlib import Path
 
 import config
+from helpers import search_scope
 from helpers.guardrails import truncate_output
 from helpers.save_output import save_full_output
 from helpers.sensitive_paths import contains_secret_content, is_sensitive_path, path_is_or_contains_secret
@@ -435,8 +436,6 @@ def _align_find_to_document_kind(command: str, user_query: str) -> str:
 _WHOLE_MACHINE_RE = re.compile(r"(?:ทั้งเครื่อง|ทั้งคอม|ทั่วเครื่อง|ทุกไฟล์ใน\s*Mac)", re.IGNORECASE)
 _LIST_INTENT_RE = re.compile(r"(?:รายการ|ลิสต์|ดูรายการ|\blist\b|\bshow\b)", re.IGNORECASE)
 _COUNT_INTENT_RE = re.compile(r"(?:นับ|กี่ไฟล์|จำนวน|\bcount\b|\bhow many\b)", re.IGNORECASE)
-
-
 def _align_whole_machine_content_scope(command: str, user_query: str) -> str:
     """Repair a project-scoped grep when the user asked for the whole Mac."""
     if not _WHOLE_MACHINE_RE.search(user_query or ""):
@@ -457,6 +456,76 @@ def _align_whole_machine_content_scope(command: str, user_query: str) -> str:
     return f"mdfind {shlex.quote(operands[0])}"
 
 
+def _align_filename_search(command: str, user_query: str) -> str:
+    """Use Spotlight when the agent itself constructed a filename glob.
+
+    The model owns natural-language intent and the search term. This adapter
+    only changes the execution backend for an explicit ``find -name``/``-iname``
+    operand, preserving that operand verbatim; it never guesses a term from
+    the user's sentence.
+    """
+    try:
+        tokens = shlex.split(command.split("|", 1)[0].strip())
+    except ValueError:
+        return command
+    if not tokens or tokens[0] != "find":
+        return command
+    pattern = None
+    for index, token in enumerate(tokens[:-1]):
+        if token in {"-name", "-iname"}:
+            pattern = tokens[index + 1]
+            break
+    if not pattern:
+        return command
+    query = f"kMDItemFSName == '{pattern}'cd"
+    return f"mdfind {shlex.quote(query)}"
+
+
+def _align_project_scope(command: str, user_query: str) -> str:
+    """Keep model-generated project searches inside the named project.
+
+    The model remains responsible for the search term and command intent. This
+    adapter only replaces filesystem roots when it ignored the explicit
+    project scope and pointed grep/find/Spotlight at a sibling project.
+    """
+    if not search_scope.is_project_scoped_query(user_query):
+        return command
+    first, *pipeline = command.split("|", 1)
+    try:
+        tokens = shlex.split(first.strip())
+    except ValueError:
+        return command
+    if not tokens:
+        return command
+    executable = tokens[0]
+    root = str(config.PROJECT_ROOT)
+    if executable in {"grep", "rg"}:
+        operands = [index for index, token in enumerate(tokens[1:], start=1) if not token.startswith("-")]
+        if executable == "rg" and "--files" in tokens:
+            path_indexes = operands
+        else:
+            path_indexes = operands[1:]
+        if path_indexes:
+            for index in path_indexes:
+                tokens[index] = root
+        else:
+            tokens.append(root)
+    elif executable == "find":
+        if len(tokens) > 1 and not tokens[1].startswith("-"):
+            tokens[1] = root
+    elif executable == "mdfind":
+        if "-onlyin" in tokens:
+            index = tokens.index("-onlyin")
+            if index + 1 < len(tokens):
+                tokens[index + 1] = root
+        else:
+            tokens[1:1] = ["-onlyin", root]
+    else:
+        return command
+    aligned = shlex.join(tokens)
+    return aligned if not pipeline else f"{aligned} | {pipeline[0].strip()}"
+
+
 def _align_listing_intent(command: str, user_query: str) -> str:
     """Do not turn a list request into a count followed by a retry."""
     if not _LIST_INTENT_RE.search(user_query or "") or _COUNT_INTENT_RE.search(user_query or ""):
@@ -474,6 +543,8 @@ def _align_listing_intent(command: str, user_query: str) -> str:
 
 def normalize_command_for_query(command: str, user_query: str) -> str:
     command = _align_find_to_document_kind(command, user_query)
+    command = _align_filename_search(command, user_query)
+    command = _align_project_scope(command, user_query)
     command = _align_whole_machine_content_scope(command, user_query)
     return _align_listing_intent(command, user_query)
 

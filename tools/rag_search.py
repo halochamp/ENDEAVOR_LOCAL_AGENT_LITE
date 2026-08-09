@@ -21,6 +21,7 @@ import unicodedata
 from pathlib import Path
 
 import config
+from helpers import search_scope
 from helpers.sensitive_paths import is_sensitive_path
 from helpers.thai_text_normalize import repair_thai_combining_mark_spacing
 
@@ -59,6 +60,19 @@ _STOP_WORDS = {
 _WORD_RE = re.compile(r"[\wก-๙]+", re.UNICODE)
 _ENGLISH_SPLIT_MIN_CHARS = 5
 _MAX_ENGLISH_SPLIT_VARIANTS = 24
+_PROJECT_SCAN_EXCLUDED_DIRS = {
+    ".git", "__pycache__", ".pytest_cache", ".lite_state", "logs", "graphify-out",
+    "build", "dist", "coverage",
+}
+_PROJECT_CONTENT_SUFFIXES = frozenset({
+    ".py", ".pyi", ".md", ".markdown", ".txt", ".text", ".json", ".jsonl",
+    ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".html", ".css",
+    ".js", ".ts", ".tsx", ".jsx", ".sh", ".zsh", ".swift", ".sql",
+})
+_PROJECT_CONTENT_SCAN_SECONDS = 4.0
+_PROJECT_CONTENT_MAX_RESULTS = 50
+_PROJECT_CONTENT_DEFAULT_RESULTS = 15
+_PROJECT_CONTENT_SNIPPET_CHARS = 180
 # Keep query normalization aligned with indexer._normalize_extracted_text:
 # PDF layout extraction can insert a space before a Thai combining mark, and
 # users may paste that same visibly-floating form back into search.  Remove
@@ -141,18 +155,33 @@ def _english_split_match_query(q: str) -> str:
     return " OR ".join(variants)
 
 
+def _filename_fallback_needle(query: str) -> str:
+    """Use the concise search term selected by the agent verbatim.
+
+    Natural-language intent extraction belongs to the model/tool call, not a
+    growing list of language-specific phrase rules in the fallback. This
+    fallback is deliberately a literal filename scan of the tool argument.
+    """
+    return (query or "").strip().casefold()
+
+
 def _fallback_filename_search(query: str, *, reason: str = "no_index") -> str:
     """Fast bounded filename lookup, used two ways: (1) no index exists yet
     at all, (2) the index exists but the FTS query above matched nothing --
     a broader, code-driven retry rather than making the model notice a zero-
     result reply and manually re-issue a looser query itself (small models
     don't reliably do this, per this project's own live findings tonight)."""
-    needle = query.casefold()
+    needle = _filename_fallback_needle(query)
     home = Path.home()
     # User-facing folders are searched first, so a cold search is useful on a
     # real Mac instead of timing out while walking caches/venvs under $HOME.
-    roots = [home / name for name in ("Desktop", "Documents", "Downloads")]
-    roots.append(config.PROJECT_ROOT)
+    project_root = config.PROJECT_ROOT if search_scope.is_project_scoped_query() else None
+    roots = [project_root] if project_root is not None else [
+        # The running project is the most useful local context for a concise
+        # filename query, even when the user did not repeat "in this project".
+        config.PROJECT_ROOT,
+        *(home / name for name in ("Desktop", "Documents", "Downloads")),
+    ]
     deadline = time.monotonic() + 4.0
     matches: list[str] = []
     seen: set[Path] = set()
@@ -190,17 +219,143 @@ def _fallback_filename_search(query: str, *, reason: str = "no_index") -> str:
     return f"{header}\n" + "\n".join(matches) + suffix
 
 
+def _project_content_fallback(query: str) -> str:
+    """Search the current project when the global document index has no row.
+
+    The regular index intentionally limits itself to user documents and text
+    excerpts.  A project request must still be useful for source/config files
+    such as ``indexer.py`` and ``bash.py``.  This bounded fallback reads only
+    the named project, keeps the agent's concise query literal, and never
+    scans arbitrary sibling projects or caches.
+    """
+    if not search_scope.is_project_scoped_query():
+        return ""
+    terms = [term for term in _query_terms(query) if len(term) >= 2]
+    if not terms:
+        return ""
+    root = config.PROJECT_ROOT
+    request = search_scope.request_query().casefold()
+    exhaustive_request = bool(re.search(
+        r"(?:ทั้งหมด|ครบ|ทุกไฟล์|all\s+files|every\s+file|complete|full\s+list)",
+        request,
+    ))
+    max_results = _PROJECT_CONTENT_MAX_RESULTS if exhaustive_request else _PROJECT_CONTENT_DEFAULT_RESULTS
+    deadline = time.monotonic() + _PROJECT_CONTENT_SCAN_SECONDS
+    matches: list[str] = []
+    seen: set[str] = set()
+    for dirpath, dirnames, filenames in os.walk(root, topdown=True, followlinks=False):
+        if time.monotonic() >= deadline or len(matches) >= max_results:
+            break
+        current = Path(dirpath)
+        dirnames[:] = [
+            name for name in dirnames
+            if name not in _PROJECT_SCAN_EXCLUDED_DIRS
+            and not is_sensitive_path(current / name)
+        ]
+        for name in filenames:
+            if time.monotonic() >= deadline or len(matches) >= max_results:
+                break
+            path = current / name
+            if path.suffix.casefold() not in _PROJECT_CONTENT_SUFFIXES:
+                continue
+            if path.is_symlink() or is_sensitive_path(path):
+                continue
+            try:
+                if path.stat().st_size > 4 * 1024 * 1024:
+                    continue
+                raw = path.read_bytes()
+            except OSError:
+                continue
+            if b"\x00" in raw:
+                continue
+            text = raw.decode("utf-8", errors="replace")
+            normalized = unicodedata.normalize("NFC", text).casefold()
+            hit = next((term for term in terms if term in normalized), None)
+            if hit is None:
+                continue
+            path_text = str(path)
+            if path_text in seen:
+                continue
+            seen.add(path_text)
+            position = normalized.find(hit)
+            start = max(0, position - 100)
+            snippet = " ".join(text[start:position + len(hit) + _PROJECT_CONTENT_SNIPPET_CHARS].split())
+            matches.append(f"- {path_text}\n  ({name}) ...{snippet}...")
+    if not matches:
+        return ""
+    suffix = "\n[หยุดหลังครบเวลา/จำนวนผลที่กำหนด]" if time.monotonic() >= deadline or len(matches) >= max_results else ""
+    return (
+        f"[ค้นจากเนื้อหาในโปรเจกต์ปัจจุบัน: {config.PROJECT_ROOT}]\n"
+        f"พบ {len(matches)} ไฟล์ที่มีคำค้นจาก '{query}':\n"
+        + "\n".join(matches)
+        + suffix
+    )
+
+
+def _path_in_project(path: str) -> bool:
+    if not search_scope.is_project_scoped_query():
+        return True
+    try:
+        Path(path).resolve(strict=False).relative_to(config.PROJECT_ROOT.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _is_project_artifact_path(path: str) -> bool:
+    """Keep internal search/index artifacts out of user-facing results.
+
+    The on-disk FTS database is incremental and can contain rows from an
+    older index policy.  Filtering these paths at read time prevents stale
+    ``logs/tool_outputs`` records from outranking a real source/config file;
+    it also keeps project-scoped searches focused on the working tree.
+    """
+    try:
+        relative = Path(path).resolve(strict=False).relative_to(config.PROJECT_ROOT.resolve())
+    except ValueError:
+        return False
+    return any(part in _PROJECT_SCAN_EXCLUDED_DIRS for part in relative.parts)
+
+
+def _allowed_result_path(path: str) -> bool:
+    # The index is incremental and iCloud/other sync tools can move or remove
+    # a file between index builds. Never surface a stale row: the browser's
+    # clickable-path action can only open a path that still exists.
+    try:
+        if not Path(path).is_file():
+            return False
+    except OSError:
+        return False
+    return (
+        not is_sensitive_path(path)
+        and _path_in_project(path)
+        and not _is_project_artifact_path(path)
+    )
+
+
 def run(args: dict[str, str]) -> str:
     query = (args.get("query") or "").strip()
     if not query:
         return "[error] query is required"
     if not config.FILE_INDEX_DB.exists():
-        return _fallback_filename_search(query)
+        filename_result = _fallback_filename_search(query)
+        if filename_result.startswith(("ไม่พบไฟล์", "[error]")):
+            return _project_content_fallback(query) or filename_result
+        return filename_result
 
     match_query = _safe_match_query(query)
     if not match_query:
         return "[error] query ว่างเปล่าหลัง sanitize"
     split_match_query = _english_split_match_query(query)
+
+    # FTS is primarily a document index and may not contain source/config
+    # files.  For a concise one-term locator, resolve an actual filename from
+    # the bounded filesystem fallback first; content-oriented multi-term
+    # searches continue through FTS and the project-content fallback below.
+    if search_scope.is_project_scoped_query() and len(_query_terms(query)) == 1:
+        filename_result = _fallback_filename_search(query, reason="fts_zero_hits")
+        if not filename_result.startswith("ไม่พบไฟล์"):
+            return filename_result
 
     conn = sqlite3.connect(str(config.FILE_INDEX_DB))
     try:
@@ -262,14 +417,27 @@ def run(args: dict[str, str]) -> str:
                 )
                 general_rows = general_rows[:remaining]
 
-        rows = [row for row in name_rows + general_rows if not is_sensitive_path(row[0])]
+        rows = [row for row in name_rows + general_rows if _allowed_result_path(row[0])]
     except sqlite3.OperationalError as e:
         return f"[error] ค้นหาล้มเหลว: {e}"
     finally:
         conn.close()
 
+    # A concise one-term query is commonly a filename request (``config``,
+    # ``prompts``, ``indexer.py``).  If the index has no filename candidate,
+    # try the bounded filename walk before returning a content-only hit.  This
+    # remains generic: the agent still chooses the search term; the fallback
+    # only resolves the filesystem ambiguity.
+    if search_scope.is_project_scoped_query() and not name_rows and len(_query_terms(query)) == 1:
+        filename_result = _fallback_filename_search(query, reason="fts_zero_hits")
+        if not filename_result.startswith("ไม่พบไฟล์"):
+            return filename_result
+
     if not rows:
-        return _fallback_filename_search(query, reason="fts_zero_hits")
+        filename_result = _fallback_filename_search(query, reason="fts_zero_hits")
+        if not filename_result.startswith("ไม่พบไฟล์"):
+            return filename_result
+        return _project_content_fallback(query) or filename_result
 
     lines = [f"พบ {len(rows)} ไฟล์ที่ตรงกับ '{query}':"]
     for path, name, snippet, size_bytes, kind in rows:
@@ -292,6 +460,8 @@ def run(args: dict[str, str]) -> str:
 # writeup and helpers.turn_guard.call_count().
 _FALLBACK_REMINDER = (
     "\n\n[reminder] A local-file request never switches to web_search. "
+    "If a returned snippet already contains the fact the user asked for, answer from it now "
+    "or read_file that path for more context; do NOT run bash merely to repeat a successful content hit. "
     "If this result contains the requested exact filename, use that path. "
     "If no relevant content hit exists, continue once with bash: grep on the "
     "project's absolute path, or mdfind for whole-machine content. For list/count, "

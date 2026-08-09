@@ -71,6 +71,23 @@ def test_browser_page_and_websocket_initial_state():
     assert files["truncated"] is False
 
 
+def test_assistant_markdown_renders_inside_one_bubble():
+    html = (Path(config.PROJECT_ROOT) / "ui" / "chat.html").read_text(encoding="utf-8")
+    assert "function renderMarkdown(text)" in html
+    assert "function inlineMarkdown(rawText)" in html
+    assert "function parseTableRow(line)" in html
+    assert "function isTableDivider(line)" in html
+    assert "function stripUnpairedMarkdownMarkers(value)" in html
+    assert "return renderMarkdown(text);" in html
+    assert ".msg-content > pre" not in html
+    assert "LITEMD${slots.length}X" in html
+    assert "LITE_MD_" not in html
+    assert "liveActivity: null" in html
+    assert "function renderPhaseBar()" in html
+    assert "function liveActivitySummary(task)" in html
+    assert "S.phaseSub = liveActivitySummary(S.liveActivity);" in html
+
+
 def test_browser_websocket_rejects_cross_origin():
     with TestClient(web_ui.app) as client:
         try:

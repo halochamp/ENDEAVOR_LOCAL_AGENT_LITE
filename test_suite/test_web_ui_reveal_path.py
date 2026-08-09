@@ -72,3 +72,8 @@ def test_chat_renderer_contains_safe_url_and_path_linkification():
     assert "data-local-path" in html
     assert "type:'reveal_path'" in html
     assert "trimLocalPathSuffix" in html
+    assert "Word|PDF|Excel|PowerPoint" in html
+    assert "<table><thead><tr>" in html
+    assert "function handleLocalPathClick(event)" in html
+    assert "$('panel-body').addEventListener('click', handleLocalPathClick)" in html
+    assert "${renderMarkdown(a)}" in html

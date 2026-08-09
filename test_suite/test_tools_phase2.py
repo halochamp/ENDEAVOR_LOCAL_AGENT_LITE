@@ -70,6 +70,37 @@ def test_whole_machine_alignment_replaces_project_grep_with_mdfind():
     assert command == "mdfind 'เลขที่กรมธรรม์'"
 
 
+def test_project_alignment_replaces_sibling_root_but_preserves_agent_query():
+    command = bash.normalize_command_for_query(
+        'grep -r -l "trigram tokenizer" /Users/halochampmac/Desktop/ENDEAVOR_AGENTIC/ENDEAVOR_LOCAL_AGENT_MAX_VLM',
+        "มีไฟล์ไหนในโปรเจกต์นี้พูดถึง trigram tokenizer บ้าง",
+    )
+    assert str(config.PROJECT_ROOT) in command
+    assert "ENDEAVOR_LOCAL_AGENT_MAX_VLM" not in command
+    assert "trigram tokenizer" in command
+
+
+def test_filename_search_uses_spotlight_name_query_instead_of_broad_scan():
+    command = bash.normalize_command_for_query(
+        'find /Users/halochampmac/Desktop -type f -iname "*คำสั่ง*"',
+        "ค้นหาไฟล์ในเครื่องที่มีชื่อว่าคำสั่ง",
+    )
+    assert command.startswith("mdfind ")
+    assert "kMDItemFSName" in command
+    assert "คำสั่ง" in command
+    assert command.split(maxsplit=1)[0] == "mdfind"
+
+
+def test_filename_alignment_preserves_agent_selected_term_without_user_phrase_parsing():
+    command = bash.normalize_command_for_query(
+        'find /Users/halochampmac/Desktop -type f -name "*กล้อง*"',
+        "ค้นหาไฟล์ในเครื่องที่ชื่อมีคำว่ากล้อง",
+    )
+    assert "kMDItemFSName" in command
+    assert "*กล้อง*" in command
+    assert "มีคำว่า" not in command
+
+
 def test_listing_alignment_removes_accidental_count_stage():
     assert bash.normalize_command_for_query(
         "find /Users/example/Downloads -type f | sort | wc -l",
@@ -242,7 +273,7 @@ def test_read_file_directory_given():
 
 def test_read_file_line_range():
     out = read_file.run({
-        "path": str(config.PROJECT_ROOT / "README.md"),
+        "path": str(config.PROJECT_ROOT / "PLAN.md"),
         "start_line": "1",
         "end_line": "1",
     })

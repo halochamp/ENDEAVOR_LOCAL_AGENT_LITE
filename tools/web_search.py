@@ -88,6 +88,9 @@ def _relevance_grams(text: str) -> set[str]:
     normalized = (text or "").casefold()
     for phrase in _RELEVANCE_DROP_PHRASES:
         normalized = normalized.replace(phrase, "")
+    # Search-engine operators constrain retrieval but are not evidence words;
+    # do not lower the score of the page they intentionally target.
+    normalized = re.sub(r"\bsite:[^\s]+", " ", normalized)
     compact = re.sub(r"[^0-9a-zก-๙]+", "", normalized)
     return {compact[i : i + 3] for i in range(max(0, len(compact) - 2))}
 
@@ -107,6 +110,28 @@ def _simplified_query_variant(query: str) -> str:
     for phrase in sorted(_RELEVANCE_DROP_PHRASES, key=len, reverse=True):
         value = re.sub(re.escape(phrase), " ", value, flags=re.IGNORECASE)
     value = re.sub(r"\s+", " ", value).strip(" \"'()[]{}.,:;!?")
+    return value or query
+
+
+def _feature_query_variant(query: str) -> str:
+    """Turn a natural-language feature question into a search-shaped query.
+
+    This is web-query normalization only. It does not decide whether a
+    request is local or online and it does not invent a subject; it removes
+    request/link filler while retaining the literal version/entity words.
+    """
+    value = query or ""
+    value = re.sub(r"(?:ช่วย\s*)?ค้นหา(?:ว่า)?|please\s+search(?:\s+for)?", " ", value, flags=re.IGNORECASE)
+    value = re.sub(r"พร้อม\s*(?:แนบ\s*)?(?:ลิงก์|แหล่งที่มา)(?:\s*ที่มา)?", " ", value, flags=re.IGNORECASE)
+    value = re.sub(r"(?:มี\s*)?(?:ฟีเจอร์|features?)\s*ใหม่(?:\s*อะไรบ้าง)?", " what's new ", value, flags=re.IGNORECASE)
+    value = re.sub(r"อะไรบ้าง", " ", value, flags=re.IGNORECASE)
+    value = _simplified_query_variant(value)
+    python_version = re.search(r"\bPython\s+(3\.\d+)\b", value, re.IGNORECASE)
+    if python_version:
+        version = python_version.group(1)
+        return f"site:docs.python.org/{version}/whatsnew/{version}.html Python {version} what's new"
+    if not re.search(r"what'?s\s+new", value, re.IGNORECASE):
+        value = f"{value} what's new".strip()
     return value or query
 
 
@@ -559,8 +584,18 @@ def run(args: dict[str, str]) -> str:
     search = _search_news if news_query else _search_engines
     if news_query:
         variants = (query, _news_core_variant(query))
+        quality_query = query
     else:
-        variants = (query, _simplified_query_variant(query), _official_site_variant(query))
+        feature_variant = _feature_query_variant(query) if _FEATURE_QUERY_RE.search(query) else None
+        variants = (query, feature_variant, _simplified_query_variant(query), _official_site_variant(query))
+        # Keep official-source constraints evaluated against the original
+        # request; the feature variant is only a lexical cleanup for a
+        # natural-language question such as "มีฟีเจอร์ใหม่อะไรบ้าง".
+        quality_query = (
+            feature_variant
+            if feature_variant and not _OFFICIAL_QUERY_RE.search(query)
+            else query
+        )
     combined: list[dict] = []
     seen_urls: set[str] = set()
     errors: list[str] = []
@@ -574,7 +609,7 @@ def run(args: dict[str, str]) -> str:
             if url and url not in seen_urls:
                 seen_urls.add(url)
                 combined.append(result)
-        usable = _usable_results(combined, query, require_fresh=news_query)
+        usable = _usable_results(combined, quality_query, require_fresh=news_query)
         if len(_dedupe_by_domain(usable, _MIN_OVERVIEW_SOURCES)) >= _MIN_OVERVIEW_SOURCES:
             break
 
@@ -590,12 +625,12 @@ def run(args: dict[str, str]) -> str:
     if not results:
         return _retry_message(query)
 
-    relevant = _filter_relevant(results, query)
+    relevant = _filter_relevant(results, quality_query)
     if not relevant:
         return _retry_message(query)
 
     relevant = _semantic_reject_irrelevant(
-        _dedupe_by_domain(relevant, config.WEB_SEARCH_SEMANTIC_CANDIDATES), query,
+        _dedupe_by_domain(relevant, config.WEB_SEARCH_SEMANTIC_CANDIDATES), quality_query,
     )
     if not relevant:
         return _retry_message(query)

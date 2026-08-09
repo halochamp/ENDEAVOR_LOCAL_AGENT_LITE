@@ -362,6 +362,9 @@ html, body {
   overflow-x: auto;
   margin: 6px 0;
 }
+/* md() uses a <pre> as its whitespace-preserving text wrapper.  The
+   assistant bubble already owns the background and border; keep the wrapper
+   from rendering a second nested bubble. */
 .msg-content pre code { background: none; padding: 0; color: #d4d4d4; }
 .msg-content h1,.msg-content h2,.msg-content h3 {
   color: #e0e0e0; margin: 8px 0 4px; font-weight: 600;
@@ -371,7 +374,8 @@ html, body {
 .msg-content a  { color: #569cd6; }
 .msg-content a.local-path {
   color: #4ec9b0;
-  text-decoration-style: dashed;
+  cursor: pointer;
+  text-decoration: underline dashed;
 }
 .msg-content a.local-path:hover { color: #7ee0ca; }
 .msg-content hr { border-color: #3c3c3c; margin: 8px 0; }
@@ -401,6 +405,7 @@ html, body {
   padding: 3px 16px 2px;
   font-size: 12px;
   color: #4ec9b0;
+  line-height: 1.45;
   flex-shrink: 0;
   min-height: 0;
   max-height: 0;
@@ -408,6 +413,14 @@ html, body {
   transition: max-height 0.1s;
 }
 #phase-bar.visible { max-height: 60px; }
+#phase-bar .phase-main { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#phase-bar .phase-detail {
+  color: #808080;
+  padding-left: 14px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
 /* Input area */
 #input-area {
@@ -647,6 +660,8 @@ const S = {
   // Run state
   busy: false, panelView: null,
   activity: [], streamEl: null, streamBuf: [],
+  liveActivity: null,
+  pendingRevealPath: false,
   attachment: null,
   showStream: true,   // false while tools executing, true for direct/synthesis
 
@@ -684,10 +699,177 @@ function stripThink(text) {
 }
 
 function md(text) {
-  // Agent/tool output remains escaped text.  Link markup is generated only
-  // from the escaped string below, so a hostile web result cannot inject
-  // executable HTML into this local UI.
-  return `<pre style="white-space:pre-wrap;font-family:inherit">${linkify(esc(text))}</pre>`;
+  return renderMarkdown(text);
+}
+
+function renderMarkdown(text) {
+  const lines = String(text ?? '').replace(/\r\n?/g, '\n').split('\n');
+  const out = [];
+  let paragraph = [];
+  let listType = null;
+  let codeLines = null;
+
+  const flushParagraph = () => {
+    if (paragraph.length) {
+      out.push(`<p>${inlineMarkdown(paragraph.join('\n'))}</p>`);
+      paragraph = [];
+    }
+  };
+  const closeList = () => {
+    if (listType) { out.push(`</${listType}>`); listType = null; }
+  };
+  const flushBlocks = () => { flushParagraph(); closeList(); };
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (codeLines !== null) {
+      if (/^\s*```/.test(line)) {
+        out.push(`<pre><code>${esc(codeLines.join('\n'))}</code></pre>`);
+        codeLines = null;
+      } else {
+        codeLines.push(line);
+      }
+      continue;
+    }
+
+    if (/^\s*```/.test(line)) {
+      flushBlocks();
+      codeLines = [];
+      continue;
+    }
+    if (!line.trim()) { flushBlocks(); continue; }
+
+    const tableHeader = parseTableRow(line);
+    if (tableHeader && i + 1 < lines.length && isTableDivider(lines[i + 1])) {
+      flushBlocks();
+      out.push('<table><thead><tr>'
+        + tableHeader.map(cell => `<th>${inlineMarkdown(cell)}</th>`).join('')
+        + '</tr></thead><tbody>');
+      i++; // consume the separator row
+      while (i + 1 < lines.length) {
+        const row = parseTableRow(lines[i + 1]);
+        if (!row || isTableDivider(lines[i + 1])) break;
+        i++;
+        out.push(`<tr>${row.map(cell => `<td>${inlineMarkdown(cell)}</td>`).join('')}</tr>`);
+      }
+      out.push('</tbody></table>');
+      continue;
+    }
+
+    let match = line.match(/^\s*(#{1,6})\s+(.+?)\s*#*\s*$/);
+    if (match) {
+      flushBlocks();
+      const level = match[1].length;
+      out.push(`<h${level}>${inlineMarkdown(match[2])}</h${level}>`);
+      continue;
+    }
+    if (/^\s*(?:\*{3,}|-{3,}|_{3,})\s*$/.test(line)) {
+      flushBlocks(); out.push('<hr>'); continue;
+    }
+    match = line.match(/^\s*[-*+]\s+(.+)$/);
+    if (match) {
+      flushParagraph();
+      if (listType !== 'ul') { closeList(); out.push('<ul>'); listType = 'ul'; }
+      out.push(`<li>${inlineMarkdown(match[1])}</li>`);
+      continue;
+    }
+    match = line.match(/^\s*\d+[.)]\s+(.+)$/);
+    if (match) {
+      flushParagraph();
+      if (listType !== 'ol') { closeList(); out.push('<ol>'); listType = 'ol'; }
+      out.push(`<li>${inlineMarkdown(match[1])}</li>`);
+      continue;
+    }
+    match = line.match(/^\s*>\s?(.*)$/);
+    if (match) {
+      flushBlocks(); out.push(`<blockquote>${inlineMarkdown(match[1])}</blockquote>`);
+      continue;
+    }
+    closeList();
+    paragraph.push(line);
+  }
+
+  if (codeLines !== null)
+    out.push(`<pre><code>${esc(codeLines.join('\n'))}</code></pre>`);
+  flushBlocks();
+  return out.join('');
+}
+
+function parseTableRow(line) {
+  const raw = String(line ?? '').trim();
+  if (!raw.includes('|')) return null;
+  const body = raw.replace(/^\|/, '').replace(/\|$/, '');
+  const cells = [];
+  let cell = '';
+  for (let i = 0; i < body.length; i++) {
+    if (body[i] === '\\' && body[i + 1] === '|') {
+      cell += '|'; i++; continue;
+    }
+    if (body[i] === '|') {
+      cells.push(cell.trim()); cell = ''; continue;
+    }
+    cell += body[i];
+  }
+  cells.push(cell.trim());
+  return cells.length >= 2 ? cells : null;
+}
+
+function isTableDivider(line) {
+  const cells = parseTableRow(line);
+  return Boolean(cells && cells.every(cell => /^:?-{3,}:?$/.test(cell)));
+}
+
+function inlineMarkdown(rawText) {
+  const slots = [];
+  const hold = html => {
+    // Keep the placeholder free of Markdown punctuation: `_MD_` would be
+    // parsed as emphasis before the protected link is restored.
+    const marker = `\u0000LITEMD${slots.length}X\u0000`;
+    slots.push(html);
+    return marker;
+  };
+  let text = String(rawText ?? '');
+
+  // Protect code and links before escaping/formatting plain text.
+  text = text.replace(/`([^`\n]+)`/g, (_all, code) => hold(`<code>${esc(code)}</code>`));
+  text = text.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)"']+)\)/g,
+    (_all, label, url) => hold(externalLink(esc(url), esc(label))));
+  text = text.replace(/https?:\/\/[^\s<>"'`]+/g, rawUrl => {
+    const url = trimLinkPunctuation(rawUrl);
+    return hold(externalLink(esc(url), esc(url))) + esc(rawUrl.slice(url.length));
+  });
+  text = text.replace(/(?:~\/|\/(?:Users|private|tmp|var|Volumes)\/)[^\n<>"'`*\]]+/g, rawPath => {
+    const path = trimLocalPathSuffix(rawPath);
+    return hold(localPathLink(esc(path))) + esc(rawPath.slice(path.length));
+  });
+
+  // Small models occasionally emit an opening strong/deletion marker without
+  // its closing pair (for example ``**/Users/.../file.docx``). Keep the
+  // answer readable instead of showing the unmatched Markdown punctuation.
+  text = stripUnpairedMarkdownMarkers(text);
+
+  text = esc(text)
+    .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/__([^_\n]+)__/g, '<strong>$1</strong>')
+    .replace(/~~([^~\n]+)~~/g, '<del>$1</del>')
+    .replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, '$1<em>$2</em>')
+    .replace(/(^|[^_])_([^_\n]+)_(?!_)/g, '$1<em>$2</em>')
+    .replace(/\n/g, '<br>');
+
+  return text.replace(/\u0000LITEMD(\d+)X\u0000/g, (_all, index) => slots[Number(index)]);
+}
+
+function stripUnpairedMarkdownMarkers(value) {
+  let text = value;
+  for (const marker of ['**', '__', '~~']) {
+    const escaped = marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const count = (text.match(new RegExp(escaped, 'g')) || []).length;
+    if (count % 2) {
+      const index = text.lastIndexOf(marker);
+      text = text.slice(0, index) + text.slice(index + marker.length);
+    }
+  }
+  return text;
 }
 
 function trimLinkPunctuation(value) {
@@ -695,7 +877,13 @@ function trimLinkPunctuation(value) {
 }
 
 function trimLocalPathSuffix(value) {
-  return value.replace(/[`*]+$/, '').replace(/[\]\),.;:!?]+$/, '');
+  // Search results often annotate a path as "(Word)" or "(PDF)".  Keep the
+  // label visible beside the link, but never send it to Finder as part of the
+  // filesystem path.
+  return value
+    .replace(/\s+\((?:Word|PDF|Excel|PowerPoint|Text|Image|Spreadsheet|Presentation)\)\s*$/i, '')
+    .replace(/[`*]+$/, '')
+    .replace(/[\]\),.;:!?]+$/, '');
 }
 
 function externalLink(url, label = url) {
@@ -768,14 +956,24 @@ function scrollDown() {
   el.scrollTop = el.scrollHeight;
 }
 
-$('messages').addEventListener('click', event => {
-  const link = event.target.closest('a.local-path');
+function handleLocalPathClick(event) {
+  const link = event.target.closest?.('a.local-path');
   if (!link) return;
   event.preventDefault();
-  const path = decodeURIComponent(link.dataset.localPath || '');
-  if (path && S.ws && S.ws.readyState === WebSocket.OPEN)
+  let path = '';
+  try { path = decodeURIComponent(link.dataset.localPath || ''); }
+  catch (_) { path = ''; }
+  if (!path) return;
+  if (S.ws && S.ws.readyState === WebSocket.OPEN) {
+    S.pendingRevealPath = true;
     S.ws.send(JSON.stringify({type:'reveal_path', path}));
-});
+  } else {
+    appendSystem('⚠ ยังเชื่อมต่อ agent server ไม่ได้ — เปิดไฟล์ไม่ได้');
+  }
+}
+
+$('messages').addEventListener('click', handleLocalPathClick);
+$('panel-body').addEventListener('click', handleLocalPathClick);
 
 function $(id) { return document.getElementById(id); }
 
@@ -858,6 +1056,9 @@ function onEvent(ev) {
   } else if (t === 'open_with_os_ok') {
     /* silent — OS opens the app */
 
+  } else if (t === 'path_revealed') {
+    S.pendingRevealPath = false;
+
   } else if (t === 'clear_ok') {
     stopSpinner();
     S.ctxChars = 0; updateCtx();
@@ -919,11 +1120,24 @@ function onEvent(ev) {
     if (S.panelView === 'activity') renderPanel();
 
   } else if (t === 'progress') {
-    S.phaseSub = ev.msg || '';
+    // Tool progress is rendered from the same safe args as the Activity
+    // panel.  Keep the richer live detail instead of replacing it with the
+    // generic server message ("กำลังทำงาน…").
+    if (!S.liveActivity) S.phaseSub = ev.msg || '';
 
   } else if (t === 'tool') {
-    S.activity.push({kind:'tool', name:ev.name||'', args:ev.args||{}, detail:ev.detail||'', ts:ts()});
+    const name = ev.name || '';
+    const args = ev.args || {};
+    const detail = ev.detail || '';
+    S.activity.push({kind:'tool', name, args, detail, ts:ts()});
     if (S.activity.length > MAX_ACT) S.activity = S.activity.slice(-MAX_ACT);
+    if (detail === 'กำลังทำงาน…') {
+      S.liveActivity = {name, args, detail};
+      S.phaseSub = liveActivitySummary(S.liveActivity);
+    } else if (S.liveActivity && S.liveActivity.name === name) {
+      S.liveActivity.detail = detail;
+      S.phaseSub = liveActivitySummary(S.liveActivity);
+    }
     if (S.panelView === 'activity') renderPanel();
 
   } else if (t === 'plan') {
@@ -934,6 +1148,8 @@ function onEvent(ev) {
     }
 
   } else if (t === 'synthesis_start') {
+    S.liveActivity = null;
+    S.phase = 'กำลังสรุปคำตอบ…'; S.phaseSub = '';
     S.showStream = true;
     if (S.streamEl && S.streamBuf.length) {
       const visible = stripThink(S.streamBuf.join(''));
@@ -967,7 +1183,10 @@ function onEvent(ev) {
 
   } else if (t === 'error') {
     stopSpinner();
-    if (S.streamEl)
+    if (S.pendingRevealPath) {
+      S.pendingRevealPath = false;
+      appendSystem(`⚠ ${ev.msg || 'เปิดไฟล์ไม่สำเร็จ'}`);
+    } else if (S.streamEl)
       S.streamEl.innerHTML = `<span style="color:#f48771">❌ ${esc(ev.msg||'error')}</span>`;
     else
       appendSystem(`❌ ${ev.msg || 'error'}`);
@@ -1086,19 +1305,27 @@ function stopTurn() {
 // ── Spinner ────────────────────────────────────────────────────────────────────
 function startSpinner(label) {
   S.phase = label; S.phaseSub = '';
+  S.liveActivity = null;
   const bar = $('phase-bar');
   bar.classList.add('visible');
   if (S.spinTimer) clearInterval(S.spinTimer);
+  renderPhaseBar();
   S.spinTimer = setInterval(() => {
     S.spinTick++;
-    const sp = SPINNER[S.spinTick % SPINNER.length];
-    bar.innerHTML = `${sp} ${esc(S.phase)}`
-      + (S.phaseSub ? `<div style="font-size:11px;color:#808080;padding-left:14px">→ ${esc(S.phaseSub)}</div>` : '');
+    renderPhaseBar();
   }, 80);
+}
+
+function renderPhaseBar() {
+  const sp = SPINNER[S.spinTick % SPINNER.length];
+  const bar = $('phase-bar');
+  bar.innerHTML = `<div class="phase-main">${sp} ${esc(S.phase)}</div>`
+    + (S.phaseSub ? `<div class="phase-detail">→ ${esc(S.phaseSub)}</div>` : '');
 }
 
 function stopSpinner() {
   if (S.spinTimer) { clearInterval(S.spinTimer); S.spinTimer = null; }
+  S.liveActivity = null;
   $('phase-bar').classList.remove('visible');
   $('phase-bar').innerHTML = '';
 }
@@ -1260,12 +1487,19 @@ function formatActivityArgs(name, args) {
 
 function activityArgsSummary(name, args) {
   if (!args || typeof args !== 'object') return 'รายละเอียดคำสั่ง';
-  const value = args.command ?? args.query;
+  const label = ['command', 'query', 'path', 'cwd'].find(key => typeof args[key] === 'string' && args[key]);
+  const value = label ? args[label] : null;
   if (typeof value === 'string' && value) {
-    const label = Object.hasOwn(args, 'command') ? 'command' : 'query';
     return `${label}: ${value.replace(/\s+/g, ' ').slice(0, 72)}${value.length > 72 ? '…' : ''}`;
   }
-  return `arguments: ${Object.keys(args).join(', ')}`;
+  const keys = Object.keys(args);
+  return keys.length ? `arguments: ${keys.join(', ')}` : 'รายละเอียดคำสั่ง';
+}
+
+function liveActivitySummary(task) {
+  if (!task || !task.name) return '';
+  const subject = activityArgsSummary(task.name, task.args);
+  return `${task.name}: ${subject} · ${task.detail || 'กำลังทำงาน…'}`;
 }
 
 function renderHistory() {
@@ -1293,7 +1527,7 @@ function renderHistory() {
         <div class="hist-txt">${esc(q)}</div>
         <hr style="border:none;border-top:1px solid #3c3c3c;margin:6px 0">
         <div class="hist-lbl">คำตอบ</div>
-        <div class="hist-txt">${esc(a)}</div>
+        <div class="hist-txt">${renderMarkdown(a)}</div>
       </div>
     </details>`;
   }

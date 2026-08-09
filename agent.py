@@ -27,9 +27,11 @@ from __future__ import annotations
 import json
 import functools
 import re
+import shlex
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
@@ -39,11 +41,13 @@ import config
 from helpers import turn_guard
 from helpers.date_inject import inject_datetime_context
 from helpers.guardrails import has_leaked_tool_syntax, is_boilerplate_refusal, is_degenerate_repetition
-from helpers.sensitive_paths import contains_secret_content
+from helpers import search_scope
+from helpers.sensitive_paths import contains_secret_content, is_sensitive_path
 from react import build_react_agent
 from tools import bash as _bash_tool
 from tools import rag_search as _rag_search_tool
 from tools import read_image as _read_image_tool
+from tools import web_search as _web_search_tool
 
 _LOG_PATH = config.LOG_DIR / "session.jsonl"
 
@@ -63,7 +67,12 @@ def _serialized_turn(fn):
     @functools.wraps(fn)
     def wrapped(*args, **kwargs):
         with _TURN_LOCK:
-            return fn(*args, **kwargs)
+            user_input = args[0] if args else kwargs.get("user_input", "")
+            token = search_scope.set_request_query(user_input)
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                search_scope.reset_request_query(token)
     return wrapped
 
 
@@ -181,6 +190,235 @@ def _to_lc_messages(messages: list[dict]) -> list:
     return lc
 
 
+_ABSOLUTE_USER_PATH_RE = re.compile(r"/(?:Users|Volumes|private|tmp)/[^\s`\]>,)]+")
+_PATH_LIKE_QUERY_TOKEN_RE = re.compile(
+    r"(?:~|/(?:Users|Volumes|private|tmp|var|etc|Library|System|opt|home))/[^\s`\]>,)]+"
+)
+_WEB_REQUEST_RE = re.compile(
+    r"(?:ค้นหา(?:ว่า)?|ค้นข้อมูล|หาข้อมูล|แนบลิงก์|แหล่งที่มา|ล่าสุด|ข่าว|\bsearch\b|\blook\s+up\b|\blatest\b|\bsources?\b)",
+    re.IGNORECASE,
+)
+_LOCAL_FILE_REQUEST_RE = re.compile(
+    r"(?:ไฟล์|เอกสาร|ในเครื่อง|บนเครื่อง|โปรเจกต์|โฟลเดอร์|path|/Users/|/Volumes/|\bfile\b|\bdocument\b)",
+    re.IGNORECASE,
+)
+
+
+def _should_force_web_search(query: str) -> bool:
+    """Catch a missed web route without affecting local file requests."""
+    return bool(_WEB_REQUEST_RE.search(query or "")) and not _LOCAL_FILE_REQUEST_RE.search(query or "")
+
+
+def _has_out_of_scope_path(text: str) -> bool:
+    if not search_scope.is_project_scoped_query():
+        return False
+    root = config.PROJECT_ROOT.resolve()
+    for raw_path in _ABSOLUTE_USER_PATH_RE.findall(text or ""):
+        path = Path(raw_path.rstrip(".,;:，。"))
+        try:
+            path.resolve(strict=False).relative_to(root)
+        except ValueError:
+            return True
+    return False
+
+
+def _query_requests_sensitive_path(query: str) -> bool:
+    """Recognize a sensitive path request before a model can soften the result."""
+    for raw_path in _PATH_LIKE_QUERY_TOKEN_RE.findall(query or ""):
+        path = raw_path.rstrip(".,;:，。!?！？")
+        if is_sensitive_path(path):
+            return True
+    return False
+
+
+def _ground_project_search_answer(final_text: str, last_tool_name: str | None, last_tool_result: str | None) -> str:
+    """Do not display a sibling-project path hallucinated after a local search."""
+    if last_tool_name not in {"rag_search", "bash"} or not last_tool_result:
+        return final_text
+    if not _has_out_of_scope_path(final_text):
+        return final_text
+    result = _strip_tool_reminder(last_tool_result)
+    if _has_out_of_scope_path(result):
+        return "ไม่พบผลลัพธ์ที่อยู่ในโปรเจกต์ปัจจุบันจากคำค้นนี้ครับ"
+    return f"ผลการค้นหาในโปรเจกต์ปัจจุบัน:\n\n{result}"
+
+
+def _is_project_no_result_answer(text: str) -> bool:
+    """Recognize a small-model refusal that contradicts local evidence."""
+    normalized = (text or "").casefold()
+    return bool(re.search(
+        r"(?:ไม่พบ|ไม่เจอ|ไม่มีผล|ไม่มีไฟล์|ไม่พบข้อมูล|no results?|not found|couldn't find|cannot find)",
+        normalized,
+    ))
+
+
+def _has_useful_project_rag_evidence(text: str | None) -> bool:
+    """Whether a project RAG result can safely outlive a later model loop."""
+    if not text or text.startswith(("[error]", "ไม่พบไฟล์", "ไม่พบผลลัพธ์")):
+        return False
+    return "/" in text and not _is_project_no_result_answer(text)
+
+
+_RAG_ABSOLUTE_PATH_LINE_RE = re.compile(
+    r"^\s*-\s+((?:/(?:Users|Volumes|private|tmp|var|etc|Library|System|opt|home))/[^\r\n]+?)\s*$",
+    re.MULTILINE,
+)
+
+
+def _restore_known_local_paths(final_text: str, rag_result: str | None) -> str:
+    """Restore absolute links when the model shortens verified RAG paths.
+
+    Small models often turn ``- /absolute/path/file.pdf`` into a relative
+    bullet or a bare filename while summarizing. They can also preserve a
+    relative directory prefix, so both forms are canonicalized. Only names
+    that occur exactly once in the successful RAG result are expanded, so
+    this cannot invent a directory or resolve an ambiguous filename.
+    """
+    if not final_text or not rag_result:
+        return final_text
+    paths = [match.group(1).rstrip(".,;:，。") for match in _RAG_ABSOLUTE_PATH_LINE_RE.finditer(rag_result)]
+    by_name: dict[str, list[str]] = {}
+    by_normalized_name: dict[str, list[str]] = {}
+    for path in paths:
+        name = Path(path).name
+        by_name.setdefault(name.casefold(), []).append(path)
+        normalized_name = re.sub(r"[^\w]+", "", name.casefold(), flags=re.UNICODE)
+        by_normalized_name.setdefault(normalized_name, []).append(path)
+    restored = final_text
+    for name, candidates in by_name.items():
+        if len(candidates) != 1:
+            continue
+        absolute = candidates[0]
+        basename = Path(absolute).name
+        restored = re.sub(
+            rf"(?<![/\w]){re.escape(basename)}",
+            absolute,
+            restored,
+            flags=re.IGNORECASE,
+        )
+    # A model may keep the RAG-relative directory, e.g.
+    # ``เอกสารเก่า Syllabus/เอกสารเก่า/Syllabus 402.xlsx``. Replace that whole
+    # line-level path, rather than only the basename (which would leave a
+    # broken relative prefix before the absolute link).
+    label_re = re.compile(
+        r"\s+\((?:Word|PDF|Excel|PowerPoint|Text|Image|Spreadsheet|Presentation)\)\s*$",
+        flags=re.IGNORECASE,
+    )
+    for line in restored.splitlines(keepends=True):
+        line_body = line.rstrip("\r\n")
+        line_ending = line[len(line_body):]
+        if re.search(r"/(?:Users|Volumes|private|tmp|var|etc|Library|System|opt|home)/", line_body):
+            continue
+        content_match = re.match(r"^(\s*(?:[-*+]\s+)?)", line_body)
+        content_start = content_match.end() if content_match else 0
+        content = line_body[content_start:].strip()
+        label_match = label_re.search(content)
+        label = label_match.group(0) if label_match else ""
+        path_text = content[:label_match.start()] if label_match else content
+        path_text = path_text.strip().strip("`*").rstrip(".,;:，。")
+        if "/" not in path_text:
+            continue
+        candidate_name = Path(path_text).name
+        normalized_name = re.sub(r"[^\w]+", "", candidate_name.casefold(), flags=re.UNICODE)
+        candidates = by_normalized_name.get(normalized_name, [])
+        if len(candidates) != 1:
+            continue
+        canonical = candidates[0]
+        replacement = line[:content_start] + canonical + label + line_ending
+        restored = restored.replace(line, replacement, 1)
+    # Models sometimes alter punctuation in a filename while copying a
+    # result (for example ``ฝป..pdf`` instead of the indexed ``ฝป.pdf``).
+    # For absolute path lines, repair only a unique filename whose letters
+    # and digits match after removing punctuation; this keeps the directory
+    # and the extension grounded in the successful RAG result.
+    for line in restored.splitlines(keepends=True):
+        match = re.search(r"/(?:Users|Volumes|private|tmp|var|etc|Library|System|opt|home)/", line)
+        if not match:
+            continue
+        tail = line[match.start():].rstrip("\r\n")
+        label = ""
+        label_match = re.search(
+            r"\s+\((?:Word|PDF|Excel|PowerPoint|Text|Image|Spreadsheet|Presentation)\)\s*$",
+            tail,
+            flags=re.IGNORECASE,
+        )
+        if label_match:
+            label = tail[label_match.start():]
+            tail = tail[:label_match.start()]
+        candidate_name = Path(tail.rstrip(".,;:，。")).name
+        normalized_name = re.sub(r"[^\w]+", "", candidate_name.casefold(), flags=re.UNICODE)
+        candidates = by_normalized_name.get(normalized_name, [])
+        if len(candidates) != 1:
+            continue
+        canonical = candidates[0]
+        if tail == canonical:
+            continue
+        line_body = line.rstrip("\r\n")
+        line_ending = line[len(line_body):]
+        replacement = line[:match.start()] + canonical + label + line_ending
+        restored = restored.replace(line, replacement, 1)
+    return restored
+
+
+def _normalize_write_tool_args(tool_name: str, args: dict, user_query: str = "") -> dict:
+    """Resolve a user-friendly relative workspect path before write_file.
+
+    The tool itself remains strict and accepts only absolute paths; this
+    orchestration adapter turns the common ``workspect/foo.txt`` request into
+    the exact permitted project path without broadening the write boundary.
+    """
+    if tool_name != "write_file" or not isinstance(args.get("path"), str):
+        return args
+    raw_path = args["path"].strip()
+    if raw_path and not raw_path.startswith("~"):
+        candidate = Path(raw_path).expanduser()
+        relative = candidate
+        if candidate.is_absolute():
+            try:
+                relative = candidate.resolve(strict=False).relative_to(config.PROJECT_ROOT.resolve())
+            except ValueError:
+                return args
+        else:
+            # Small models sometimes drop the leading slash from an absolute
+            # path (for example ``/tmp/x`` becomes ``tmp/x``).  Recover the
+            # path from the user's request so the strict write tool can reject
+            # it instead of silently redirecting it under workspect.  The
+            # same rule preserves legitimate absolute paths inside the
+            # project; it is not a filename-specific exception.
+            raw_name = candidate.name
+            for requested in _ABSOLUTE_USER_PATH_RE.findall(user_query or ""):
+                requested_path = Path(requested.rstrip(".,;:，。"))
+                if requested_path.name == raw_name:
+                    args["path"] = str(requested_path)
+                    return args
+        # Accept both ``workspect/foo.txt`` (the user-facing project-relative
+        # form) and ``foo.txt`` (the small model's shortened form), but never
+        # resolve a relative write against the source-tree root.
+        if relative.parts[:1] == (config.BASH_ALLOWED_ROOT.name,):
+            relative = Path(*relative.parts[1:])
+        args["path"] = str(config.BASH_ALLOWED_ROOT / relative)
+    return args
+
+
+def _user_explicitly_allows_overwrite(query: str) -> bool:
+    return bool(re.search(
+        r"(?:เขียนทับ|replace\s+(?:the\s+)?file|overwrite\s*(?:=|:)?\s*(?:true|yes|อนุญาต))",
+        query or "", re.IGNORECASE,
+    )) and not bool(re.search(r"(?:ห้าม|ไม่|not|don't|do not)\s*(?:เขียนทับ|overwrite|replace)", query or "", re.IGNORECASE))
+
+
+def _apply_first_write_overwrite_gate(args: dict, user_query: str, gate_tripped: bool) -> tuple[dict, bool]:
+    """Require the tool's safe default before accepting model self-recovery."""
+    if (
+        args.get("overwrite", "").strip().lower() == "true"
+        and not gate_tripped
+        and not _user_explicitly_allows_overwrite(user_query)
+    ):
+        args["overwrite"] = ""
+        return args, True
+    return args, gate_tripped
+
+
 _SOURCE_URL_RE = re.compile(r"\[source:\s*(https?://[^\]]+)\]")
 _PERCENT_CLAIM_RE = re.compile(
     r"(?<![\w.])\d+(?:[.,]\d+)?\s*(?:%|เปอร์เซ็นต์|ร้อยละ)", re.IGNORECASE,
@@ -245,6 +483,10 @@ def _append_source_citations(final_text: str, web_search_results: list[str]) -> 
 
 
 _TOOL_REMINDER_RE = re.compile(r"\n\n\[(?:bash usage notes|reminder)\].*", re.DOTALL)
+_NUMBER_RE = re.compile(r"(?<![\w])\d[\d,]*(?:\.\d+)?")
+_PAREN_RE = re.compile(r"\s*\(([^()]*)\)")
+_IMAGE_TEXT_REQUEST_RE = re.compile(r"(?:ข้อความ|ตัวอักษร|อ่านรูป|อ่านภาพ|\b(?:text|ocr)\b)", re.IGNORECASE)
+_OCR_RESULT_RE = re.compile(r"\[OCR\] ข้อความในภาพ:\n(.+?)(?=\n\[(?:QR|หมายเหตุ)\]|\Z)", re.DOTALL)
 _FULL_TOOL_OUTPUT_RE = re.compile(
     r"\[full output:\s*(\d+)\s+lines;\s*saved:\s*([^;\]]+);\s*preview below is incomplete\]"
 )
@@ -264,21 +506,8 @@ _WRITE_RETRY_PROMPT = (
     "Original user request: {query}"
 )
 
-_EXPLICIT_BASH_RE = re.compile(r"(?:ใช้|รัน|ด้วย|ผ่าน)\s*(?:คำสั่ง\s*)?(?:bash|shell)|\b(?:bash|shell)\s+(?:first|ก่อน)", re.IGNORECASE)
-_EXPLICIT_WEB_RE = re.compile(r"(?:เว็บ|เว็บไซต์|อินเทอร์เน็ต|ออนไลน์|\bweb\b|\binternet\b|\bwebsite\b|\burl\b|ข่าว|\bnews\b)", re.IGNORECASE)
-_LOCAL_DOCUMENT_CONTEXT_RE = re.compile(
-    r"(?:ไฟล์|เอกสาร|โฟลเดอร์|ในเครื่อง|ทั้งเครื่อง|ทั้งคอม|"
-    r"\b(?:files?|documents?|folders?|downloads?|desktop|icloud|pdf|word|excel|powerpoint|spreadsheet)\b|"
-    r"\.(?:pdf|docx?|xlsx?|pptx?|txt|md|csv)\b)",
-    re.IGNORECASE,
-)
-_LOCAL_DOCUMENT_ACTION_RE = re.compile(
-    r"(?:หา|ค้น|อยู่ไหน|ที่ไหน|กี่|นับ|จำนวน|รายการ|ลิสต์|อ่าน|เปิด|ดู|สรุป|"
-    r"\b(?:find|search|locate|where|list|count|read|open|show|summari[sz]e)\b)",
-    re.IGNORECASE,
-)
-_KNOWN_LOCAL_FILE_PATH_RE = re.compile(
-    r"/(?:Users|Volumes|private|tmp)/[^\n]+\.(?:pdf|docx?|xlsx?|pptx?|txt|md|csv)\b",
+_KNOWN_LOCAL_IMAGE_PATH_RE = re.compile(
+    r"/(?:Users|Volumes|private|var|tmp)/[^\n]+\.(?:png|jpe?g|webp|gif|bmp|tiff?|heic|heif)\b",
     re.IGNORECASE,
 )
 
@@ -287,23 +516,16 @@ def _write_action_required(query: str) -> bool:
     return bool(_WRITE_ACTION_RE.search(query))
 
 
-def _requires_rag_first(query: str) -> bool:
-    """Recognize local document discovery without memorizing eval phrases.
+def _requested_image_path(query: str) -> str | None:
+    """Return a user-supplied absolute image path for deterministic routing.
 
-    This only establishes the first cheap local lookup. The model still
-    decides whether the result is sufficient or a complete read-only bash
-    listing/count is required. Explicit bash, explicit web, writes, and reads
-    of an already known absolute file path keep their direct routes.
+    A 2B model occasionally interpreted the global RAG-before-bash rule as
+    RAG-before-every-tool and searched for an image that was already named.
+    This route is unambiguous and cheaper to enforce before the first model
+    call: read_image both returns OCR and queues the pixels for the VLM.
     """
-    return bool(
-        query
-        and not _EXPLICIT_BASH_RE.search(query)
-        and not _EXPLICIT_WEB_RE.search(query)
-        and not _write_action_required(query)
-        and not _KNOWN_LOCAL_FILE_PATH_RE.search(query)
-        and _LOCAL_DOCUMENT_CONTEXT_RE.search(query)
-        and _LOCAL_DOCUMENT_ACTION_RE.search(query)
-    )
+    match = _KNOWN_LOCAL_IMAGE_PATH_RE.search(query or "")
+    return match.group(0) if match else None
 
 
 def _strip_tool_reminder(text: str) -> str:
@@ -312,6 +534,58 @@ def _strip_tool_reminder(text: str) -> str:
     value -- meant for the model's next decision, not for display when that
     raw result is surfaced directly to the user (see BUG-004 fallback)."""
     return _TOOL_REMINDER_RE.sub("", text)
+
+
+def _strip_unsupported_local_numbers(final_text: str, evidence: list[str], query: str) -> str:
+    """Remove numeric details invented while summarizing local evidence.
+
+    The 2B model was observed copying a Thai date correctly and then adding
+    a false year conversion, and adding a date to an image that contained no
+    date.  Prompt wording did not change this across repeated live runs.
+    Preserve every number present in a successful local tool result; remove
+    only unsupported numeric asides/lines when the user did not request a
+    calculation or conversion.
+    """
+    if not evidence or re.search(r"(?:แปลง|คำนวณ|calculate|convert)", query, re.IGNORECASE):
+        return final_text
+    supported = {token.replace(",", "") for token in _NUMBER_RE.findall("\n".join(evidence))}
+    if not supported:
+        return final_text
+
+    def keep_or_drop_aside(match: re.Match) -> str:
+        numbers = {token.replace(",", "") for token in _NUMBER_RE.findall(match.group(1))}
+        return "" if numbers - supported else match.group(0)
+
+    cleaned = _PAREN_RE.sub(keep_or_drop_aside, final_text)
+    kept_lines: list[str] = []
+    for line in cleaned.splitlines():
+        # Ignore Markdown/list ordinals when deciding whether a factual line
+        # contains evidence-backed numbers.
+        factual = re.sub(r"^\s*(?:[-*]\s*)?\d+[.)]\s+", "", line)
+        numbers = {token.replace(",", "") for token in _NUMBER_RE.findall(factual)}
+        if numbers and not (numbers & supported):
+            continue
+        kept_lines.append(line)
+    return "\n".join(kept_lines).strip()
+
+
+def _ground_image_text_answer(final_text: str, image_result: str, query: str) -> str:
+    """Use deterministic OCR for an explicit image-text request.
+
+    Visual description remains the VLM's job.  When the user specifically
+    asks what text is present, the local OCR result is already the grounded
+    answer and avoids a small model dropping or replacing it during prose
+    synthesis.
+    """
+    if not _IMAGE_TEXT_REQUEST_RE.search(query or ""):
+        return final_text
+    match = _OCR_RESULT_RE.search(image_result or "")
+    if not match:
+        return final_text
+    ocr = match.group(1).strip()
+    if not ocr or ocr.startswith("ไม่พบข้อความ"):
+        return final_text
+    return f"ข้อความที่อ่านได้จากภาพ:\n\n{ocr}"
 
 
 def _fallback_summary(tool_log: list[str]) -> str:
@@ -394,28 +668,29 @@ def run_turn(
     working = _to_lc_messages(messages)
     working.append(HumanMessage(content=injected_input))
 
-    # Model-free first step for local document discovery. Repeated live runs
-    # showed that a 2B model can route the same local PDF request to the web
-    # despite correct examples. Starting from a valid tool-call/result pair
-    # enforces RAG-first, saves one model round, and leaves the next decision
-    # (answer, read_file, or a complete bash list/count) to ReAct.
-    rag_prefill_result: str | None = None
-    rag_prefill_ok = False
-    rag_prefill_args: dict[str, str] | None = None
-    if _requires_rag_first(user_input):
-        rag_prefill_args = {"query": user_input}
-        on_step(event="tool_start", name="rag_search", args=rag_prefill_args)
-        rag_prefill_result = _rag_search_tool.rag_search.invoke(rag_prefill_args)
-        rag_prefill_ok = not rag_prefill_result.startswith(("[error]", "[blocked]"))
-        on_step(event="tool_done", name="rag_search", ok=rag_prefill_ok)
-        call_id = "rag-first-policy"
+    direct_image_path = None if attachment_image else _requested_image_path(user_input)
+    if direct_image_path:
+        image_args = {"path": direct_image_path}
+        on_step(event="tool_start", name="read_image", args=image_args)
+        image_result = _read_image_tool.read_image.invoke(image_args)
+        image_ok = not image_result.startswith(("[error]", "[blocked]"))
+        on_step(event="tool_done", name="read_image", ok=image_ok)
+        image_call_id = "direct-image-policy"
         working.extend([
             AIMessage(content="", tool_calls=[{
-                "name": "rag_search", "args": rag_prefill_args,
-                "id": call_id, "type": "tool_call",
+                "name": "read_image", "args": image_args,
+                "id": image_call_id, "type": "tool_call",
             }]),
-            ToolMessage(content=rag_prefill_result, tool_call_id=call_id, name="rag_search"),
+            ToolMessage(
+                content=image_result, tool_call_id=image_call_id, name="read_image",
+            ),
         ])
+
+    # Keep the user's request as the model's input and let the agent choose
+    # both the first tool and its concise query argument. A code-generated
+    # rag_search call would expose the whole natural-language request as the
+    # query and would make phrase-specific intent extraction a hidden second
+    # router. The system prompt now makes the argument contract explicit.
 
     agent = _get_react_agent(streaming=stream_tokens)
     run_config = {"recursion_limit": _RECURSION_LIMIT}
@@ -425,13 +700,26 @@ def run_turn(
     try:
         final_msg = None
         web_search_results: list[str] = []
-        last_tool_name: str | None = "rag_search" if rag_prefill_ok else None
-        last_tool_result: str | None = rag_prefill_result if rag_prefill_ok else None
+        local_evidence_results: list[str] = []
+        if direct_image_path and image_ok:
+            local_evidence_results.append(image_result)
+        last_tool_name: str | None = (
+            "read_image" if direct_image_path and image_ok else None
+        )
+        last_tool_result: str | None = (
+            image_result if direct_image_path and image_ok else None
+        )
+        first_rag_result: str | None = None
+        first_rag_query: str | None = None
+        bash_seen = False
+        forced_whole_machine_result: str | None = None
+        forced_web_result: str | None = None
+        write_overwrite_gate_tripped = False
         issued_tool_calls: set[tuple[str, str]] = set()
-        if rag_prefill_args is not None:
+        if direct_image_path:
             issued_tool_calls.add((
-                "rag_search",
-                json.dumps(rag_prefill_args, sort_keys=True, ensure_ascii=False, default=str),
+                "read_image",
+                json.dumps({"path": direct_image_path}, sort_keys=True, ensure_ascii=False),
             ))
         duplicate_tool_call: dict | None = None
         cancelled = False
@@ -450,11 +738,17 @@ def run_turn(
                         tool_calls = getattr(m, "tool_calls", None) or []
                         for tc in tool_calls:
                             args = dict(tc.get("args", {}))
+                            args = _normalize_write_tool_args(tc["name"], args, user_input)
+                            args, write_overwrite_gate_tripped = _apply_first_write_overwrite_gate(
+                                args, user_input, write_overwrite_gate_tripped,
+                            )
+                            if tc["name"] == "rag_search" and first_rag_query is None:
+                                first_rag_query = str(args.get("query") or "").strip()
                             if tc["name"] == "bash" and isinstance(args.get("command"), str):
                                 args["command"] = _bash_tool.normalize_command_for_query(
                                     args["command"], user_input,
                                 )
-                                tc["args"] = args
+                            tc["args"] = args
                             key = (
                                 tc["name"],
                                 json.dumps(args, sort_keys=True, ensure_ascii=False, default=str),
@@ -465,7 +759,7 @@ def run_turn(
                                 stop_for_duplicate = True
                                 break
                             issued_tool_calls.add(key)
-                            on_step(event="tool_start", name=tc["name"], args=tc.get("args", {}))
+                            on_step(event="tool_start", name=tc["name"], args=args)
                         if not tool_calls:
                             final_msg = m
                     elif node_name == "tools":
@@ -475,21 +769,65 @@ def run_turn(
                         # from a FIFO queue of prior agent calls.
                         name = getattr(m, "name", None) or "?"
                         content = m.content if isinstance(m.content, str) else str(m.content)
+                        if name == "bash":
+                            bash_seen = True
                         if name == "web_search":
                             web_search_results.append(content)
                         status = getattr(m, "status", None)
                         ok = status != "error" and not (
                             content.startswith("[error]") or content.startswith("[blocked]")
                         )
+                        if name == "write_file" and not ok and not _user_explicitly_allows_overwrite(user_input):
+                            write_overwrite_gate_tripped = True
                         on_step(event="tool_done", name=name, ok=ok)
                         if ok:
                             last_tool_name, last_tool_result = name, content
+                            if name == "rag_search" and first_rag_result is None:
+                                first_rag_result = content
+                            if name in {"bash", "rag_search", "read_file", "read_image"}:
+                                local_evidence_results.append(content)
                     if stop_for_duplicate:
                         break
                 if stop_for_duplicate:
                     break
             if stop_for_duplicate:
                 break
+
+        # A whole-machine request needs a completeness pass even when the
+        # global RAG index already returned a few hits. The model selected the
+        # concise first query; the code only supplies the required Spotlight
+        # backend and records it like a normal tool call. This prevents a
+        # partial index result from being presented as the whole machine.
+        if (
+            not cancelled
+            and search_scope.is_whole_machine_query(user_input)
+            and first_rag_query
+            and not bash_seen
+        ):
+            whole_machine_command = f"mdfind {shlex.quote(first_rag_query)}"
+            on_step(event="tool_start", name="bash", args={"command": whole_machine_command})
+            whole_machine_result = _bash_tool.bash.invoke({"command": whole_machine_command})
+            whole_machine_ok = not whole_machine_result.startswith(("[error]", "[blocked]"))
+            on_step(event="tool_done", name="bash", ok=whole_machine_ok)
+            if whole_machine_ok:
+                last_tool_name, last_tool_result = "bash", whole_machine_result
+                local_evidence_results.append(whole_machine_result)
+                forced_whole_machine_result = whole_machine_result
+
+        # A current/web request must not silently become a model-only answer.
+        # If the small model skipped web_search entirely, issue one guarded
+        # call using the original request; tools/web_search owns query
+        # normalization and source filtering. The final answer is grounded in
+        # that result rather than in the model's unsupported prior prose.
+        if not cancelled and _should_force_web_search(user_input) and not web_search_results:
+            on_step(event="tool_start", name="web_search", args={"query": user_input})
+            web_result = _web_search_tool.web_search.invoke({"query": user_input})
+            web_ok = not web_result.startswith(("[error]", "[blocked]"))
+            on_step(event="tool_done", name="web_search", ok=web_ok)
+            if web_ok:
+                web_search_results.append(web_result)
+                last_tool_name, last_tool_result = "web_search", web_result
+                forced_web_result = web_result
 
         duplicate_recovered = bool(
             duplicate_tool_call is not None
@@ -549,9 +887,16 @@ def run_turn(
                         if node_name == "agent":
                             tool_calls = getattr(m, "tool_calls", None) or []
                             for tc in tool_calls:
+                                retry_args = _normalize_write_tool_args(
+                                    tc["name"], dict(tc.get("args", {})), user_input,
+                                )
+                                retry_args, write_overwrite_gate_tripped = _apply_first_write_overwrite_gate(
+                                    retry_args, user_input, write_overwrite_gate_tripped,
+                                )
+                                tc["args"] = retry_args
                                 if tc["name"] == "write_file":
                                     retry_emitted_write_call = True
-                                on_step(event="tool_start", name=tc["name"], args=tc.get("args", {}))
+                                on_step(event="tool_start", name=tc["name"], args=retry_args)
                             if not tool_calls:
                                 final_msg = m
                         elif node_name == "tools":
@@ -566,6 +911,8 @@ def run_turn(
                             on_step(event="tool_done", name=name, ok=ok)
                             if ok:
                                 last_tool_name, last_tool_result = name, content
+                                if name in {"bash", "rag_search", "read_file", "read_image"}:
+                                    local_evidence_results.append(content)
             if not retry_emitted_write_call:
                 # The retry produced no actual write_file call, so the first
                 # answer remains the only meaningful fallback for the caller.
@@ -666,9 +1013,52 @@ def run_turn(
                 aborted = True
             final_text = _append_source_citations(final_text, web_search_results)
 
+        if not web_search_results:
+            if forced_whole_machine_result:
+                final_text = f"ผลการค้นหาทั้งเครื่อง:\n\n{_strip_tool_reminder(forced_whole_machine_result)}"
+                aborted = False
+            # A successful project content fallback is already a complete,
+            # grounded locator result. If the small model loops while trying
+            # to summarize it, surface that result instead of the loop guard
+            # message; this is the same deterministic completion principle as
+            # the large-output bash fallback below.
+            if (
+                search_scope.is_project_scoped_query()
+                and first_rag_result
+                and _has_useful_project_rag_evidence(first_rag_result)
+                and (
+                    aborted
+                    or (
+                        first_rag_result.startswith("[ค้นจากเนื้อหาในโปรเจกต์ปัจจุบัน:")
+                        and _is_project_no_result_answer(final_text)
+                    )
+                )
+            ):
+                final_text = f"ผลการค้นหาในโปรเจกต์ปัจจุบัน:\n\n{_strip_tool_reminder(first_rag_result)}"
+                aborted = False
+            final_text = _ground_project_search_answer(
+                final_text, last_tool_name, last_tool_result,
+            )
+            final_text = _restore_known_local_paths(final_text, first_rag_result)
+            final_text = _strip_unsupported_local_numbers(
+                final_text, locals().get("local_evidence_results", []), user_input,
+            )
+        elif forced_web_result:
+            final_text = f"ผลการค้นหาจากเว็บ:\n\n{_strip_tool_reminder(forced_web_result)}"
+            aborted = False
+            if direct_image_path and image_ok:
+                final_text = _ground_image_text_answer(final_text, image_result, user_input)
+
         # Defense in depth: a tool or a vision-model response must not place a
         # credential-shaped string into the UI, history, or session log.
-        if contains_secret_content(final_text):
+        denied_user_command = _bash_tool._is_denied(user_input)
+        if denied_user_command:
+            final_text = f"[blocked] คำสั่งนี้ถูกบล็อกเพื่อความปลอดภัย: {denied_user_command}"
+            aborted = True
+        elif _query_requests_sensitive_path(user_input):
+            final_text = "[blocked] ไม่อนุญาตให้อ่านไฟล์หรือโฟลเดอร์ที่อาจมีรหัสผ่าน, token, key หรือ session"
+            aborted = True
+        elif contains_secret_content(final_text):
             final_text = "[blocked] คำตอบมีข้อมูลที่มีรูปแบบคล้าย credential หรือ token จึงไม่แสดงผล"
             aborted = True
     # Keep a private, structured turn audit.  The older log retained only a

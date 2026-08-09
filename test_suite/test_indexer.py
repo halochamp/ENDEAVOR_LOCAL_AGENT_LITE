@@ -450,6 +450,55 @@ def test_search_zero_fts_hits_falls_back_to_filename_search():
     assert "ขยายผลการค้นหา" in out
 
 
+def test_project_scope_zero_fts_hits_falls_back_to_source_content(monkeypatch, tmp_path):
+    """Project searches must locate source/config content absent from the
+    document-only global index, without leaking a sibling project's result."""
+    import config
+    import tools.rag_search as rag_search
+    from helpers import search_scope
+
+    project = tmp_path / "ENDEAVOR_AGENT_LITE"
+    project.mkdir()
+    source = project / "indexer.py"
+    source.write_text("# trigram tokenizer implementation\n", encoding="utf-8")
+    monkeypatch.setattr(config, "PROJECT_ROOT", project)
+    token = search_scope.set_request_query("มีไฟล์ไหนในโปรเจกต์นี้พูดถึง trigram tokenizer บ้าง")
+    try:
+        out = rag_search.run({"query": "trigram tokenizer"})
+    finally:
+        search_scope.reset_request_query(token)
+    assert "indexer.py" in out
+    assert str(project) in out
+    assert str(CORPUS) not in out
+
+
+def test_project_artifact_paths_are_not_user_search_results(monkeypatch, tmp_path):
+    import config
+    import tools.rag_search as rag_search
+
+    project = tmp_path / "ENDEAVOR_AGENT_LITE"
+    project.mkdir()
+    monkeypatch.setattr(config, "PROJECT_ROOT", project)
+    (project / "config.py").write_text("PROJECT_ROOT = '.'\n", encoding="utf-8")
+    assert rag_search._is_project_artifact_path(str(project / "logs" / "tool_outputs" / "old.txt"))
+    assert rag_search._is_project_artifact_path(str(project / "workspect" / "_test_index_data" / "old.txt")) is False
+    assert rag_search._allowed_result_path(str(project / "config.py"))
+    assert not rag_search._allowed_result_path(str(project / "missing.py"))
+
+
+def test_concise_filename_query_prefers_bounded_filename_fallback(monkeypatch):
+    import tools.rag_search as rag_search
+
+    monkeypatch.setattr(
+        rag_search,
+        "_fallback_filename_search",
+        lambda query, reason="no_index": "[filename fallback]\n/Users/test/config.py",
+    )
+    out = rag_search.run({"query": "config"})
+    assert "filename fallback" in out
+    assert "config.py" in out
+
+
 def test_search_no_match():
     out = _search("zzzznonexistentterm")
     assert "ไม่พบ" in out
@@ -474,6 +523,12 @@ def test_no_index_uses_local_filename_fallback(monkeypatch, tmp_path):
     out = rag_search.run({"query": "report"})
     assert "local filename fallback" in out
     assert "/Users/test/report.txt" in out
+
+
+def test_filename_fallback_extracts_name_from_thai_sentence():
+    import tools.rag_search as rag_search
+    assert rag_search._filename_fallback_needle("กล้อง") == "กล้อง"
+    assert rag_search._filename_fallback_needle("ค้นหาไฟล์ในเครื่องที่ชื่อมีคำว่ากล้อง") == "ค้นหาไฟล์ในเครื่องที่ชื่อมีคำว่ากล้อง"
 
 
 def test_query_latency_under_one_second():
@@ -549,6 +604,7 @@ def test_default_index_roots_are_limited_to_finder_favorites(monkeypatch):
         Path.home() / "Desktop",
         Path.home() / "Documents",
         Path.home() / "Downloads",
+        Path("/Users/Shared/halochamp"),
     ]
 
     # The module-scoped fixture intentionally directs all subsequent tests to
