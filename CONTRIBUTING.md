@@ -3,7 +3,7 @@
 ## Development setup
 
 Use macOS on Apple Silicon with Python 3.11. Run the installer, which builds
-the Apple Vision OCR helper locally and creates `.venv`:
+the optional Apple Vision OCR helper when Swift is available and creates `.venv`:
 
 ```bash
 bash install_library/install.sh

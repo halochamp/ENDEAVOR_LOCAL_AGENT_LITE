@@ -604,7 +604,6 @@ def test_default_index_roots_are_limited_to_finder_favorites(monkeypatch):
         Path.home() / "Desktop",
         Path.home() / "Documents",
         Path.home() / "Downloads",
-        Path("/Users/Shared/halochamp"),
     ]
 
     # The module-scoped fixture intentionally directs all subsequent tests to

@@ -55,7 +55,7 @@ cd ENDEAVOR_AGENT_LITE
 bash install_library/install.sh
 ```
 
-ตัวติดตั้งจะสร้าง OCR helper จาก Swift source, สร้าง `.venv` ด้วย Python 3.11 และติดตั้ง dependencies ที่ lock พร้อม hash โดยยังไม่เริ่มโหลดโมเดล
+ตัวติดตั้งจะพยายามสร้าง OCR helper จาก Swift source (เป็นฟีเจอร์เสริม ถ้าไม่มี Xcode Command Line Tools จะข้ามได้), สร้าง `.venv` ด้วย Python 3.11 และติดตั้ง dependencies ที่ lock พร้อม hash โดยยังไม่เริ่มโหลดโมเดล
 
 ### 2. เลือกวิธีเปิดใช้งาน
 

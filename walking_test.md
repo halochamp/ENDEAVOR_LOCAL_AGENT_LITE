@@ -1,24 +1,22 @@
 # ENDEAVOR_AGENT_LITE — Walking Test
 
 > Structure required by `/walk` (`~/.claude/skills/walk/SKILL.md`). Arch: create_react_agent
-> (LangGraph) + Qwen3.5-2B-OptiQ-4bit via mlx_vlm.server. Runs on the Backup Mac
-> (`whoami`=halochampmac) — LITE's own small vision server, not MAX/API/MAX_VLM's 35B
-> servers (root CLAUDE.md §6.5).
+> (LangGraph) + the configured LITE model via mlx_vlm.server. This test is local-only
+> and must use LITE's own small model server, not another project's server.
 >
 > **Precondition `/walk` does not start automatically:** the model server must already be
-> running before Phase 1c — `curl -s http://127.0.0.1:8090/v1/models` should return a model
-> list. If not: `workspect/.lite_state/web_venv_py311/bin/python -m mlx_vlm.server --model
-> mlx-community/Qwen3.5-2B-OptiQ-4bit --port 8090 --host 127.0.0.1 --api-key x` (separate
-> terminal, leave running).
+> running before Phase 1c — `curl -s "${LITE_MLX_BASE_URL:-http://127.0.0.1:8090/v1}/models"`
+> should return a model list. If not, activate `.venv` and run the command printed by
+> `bash install_library/install.sh` in a separate terminal.
 >
-> **Runtime note:** `ui_cli.py` needs `langchain`/`langgraph`, not present in the venv above —
-> use `/Users/halochampmac/anaconda3/bin/python3` (see START_COMMAND).
+> **Runtime note:** run both the server and CLI from this clone's `.venv`; do not use a
+> developer-specific interpreter path.
 
 ## Config
-- START_COMMAND: curl -sf http://127.0.0.1:8090/v1/models >/dev/null || echo "[ERROR] mlx_vlm.server not running on :8090 — start it first, see precondition note above"; cd /Users/halochampmac/Desktop/ENDEAVOR_AGENTIC/ENDEAVOR_AGENT_LITE && /Users/halochampmac/anaconda3/bin/python3 ui_cli.py
+- START_COMMAND: curl -sf "${LITE_MLX_BASE_URL:-http://127.0.0.1:8090/v1}/models" >/dev/null || echo "[ERROR] mlx_vlm.server is not ready — start it first, see precondition note above"; source .venv/bin/activate; python ui_cli.py
 - READY_SIGNAL: ENDEAVOR AGENT LITE
 - RESPONSE_END_MARKER: ╌╌╌╌
-- REGRESSION_TESTS: cd /Users/halochampmac/Desktop/ENDEAVOR_AGENTIC/ENDEAVOR_AGENT_LITE && /Users/halochampmac/anaconda3/bin/python3 test_suite/test_guardrails.py && /Users/halochampmac/anaconda3/bin/python3 test_suite/test_history_compaction.py && /Users/halochampmac/anaconda3/bin/python3 test_suite/test_tool_parser.py
+- REGRESSION_TESTS: python -m pytest -q test_suite
 - PRE_COMMIT_GATE: grep -n "raise RuntimeError" agent.py react.py
 - FLAKY_RETRIES: 3
 - LOG_CMD: logs/session.jsonl (structured per-turn tool_log — supplementary to the tmux-captured `/tmp/smoke_app.log`; use for exact tool-name/success verification when the `⎿` CLI line is ambiguous)

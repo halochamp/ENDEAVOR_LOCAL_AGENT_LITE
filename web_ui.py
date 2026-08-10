@@ -23,6 +23,7 @@ import tempfile
 import threading
 import time
 from urllib.parse import unquote
+from urllib.request import Request as URLRequest, urlopen
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -260,10 +261,26 @@ def _internet_available() -> bool:
 
 
 def _mlx_server_up() -> bool:
+    """Return true only when the configured OpenAI endpoint is ready.
+
+    A TCP listener can be an unrelated process or an MLX server that is still
+    loading its model.  `/v1/models` verifies both protocol readiness and the
+    model selected in Lite's effective configuration.
+    """
     try:
-        with socket.create_connection((config.MLX_SERVER_HOST, config.MLX_SERVER_PORT), timeout=0.5):
-            return True
-    except OSError:
+        headers = {"Authorization": f"Bearer {config.MLX_API_KEY}"} if config.MLX_API_KEY else {}
+        request = URLRequest(
+            f"{config.MLX_BASE_URL.rstrip('/')}/models",
+            headers=headers,
+        )
+        with urlopen(request, timeout=0.75) as response:
+            payload = json.loads(response.read(64 * 1024).decode("utf-8"))
+        models = payload.get("data", [])
+        return isinstance(models, list) and any(
+            isinstance(item, dict) and item.get("id") == config.MODEL_ID
+            for item in models
+        )
+    except (OSError, ValueError, TypeError, AttributeError):
         return False
 
 

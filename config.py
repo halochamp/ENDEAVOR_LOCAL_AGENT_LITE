@@ -116,7 +116,6 @@ _DEFAULT_INDEX_ROOTS = [
     Path.home() / "Desktop",
     Path.home() / "Documents",
     Path.home() / "Downloads",
-    Path("/Users/Shared/halochamp"),
 ]
 _configured_index_roots = os.getenv("LITE_INDEX_ROOTS")
 INDEX_ROOTS = (

@@ -49,12 +49,16 @@ echo
 echo "[3/5] Building the Apple Vision OCR helper from source"
 SWIFTC="$(xcrun --find swiftc 2>/dev/null || true)"
 if [[ -z "$SWIFTC" ]]; then
-  echo "[error] Swift compiler not found. Install Xcode Command Line Tools: xcode-select --install"
-  exit 1
+  echo "[warning] Swift compiler not found; skipping optional Apple Vision OCR helper."
+  echo "          Install Xcode Command Line Tools and rerun if image OCR is needed:"
+  echo "          xcode-select --install"
+elif "$SWIFTC" "$PROJECT_DIR/helpers/_vision_ocr.swift" -o "$PROJECT_DIR/helpers/vision_ocr_macos"; then
+  chmod 755 "$PROJECT_DIR/helpers/vision_ocr_macos"
+  echo "Built: helpers/vision_ocr_macos"
+else
+  echo "[warning] Could not build optional Apple Vision OCR helper; continuing without it."
+  echo "          Install/fix Xcode Command Line Tools and rerun if image OCR is needed."
 fi
-"$SWIFTC" "$PROJECT_DIR/helpers/_vision_ocr.swift" -o "$PROJECT_DIR/helpers/vision_ocr_macos"
-chmod 755 "$PROJECT_DIR/helpers/vision_ocr_macos"
-echo "Built: helpers/vision_ocr_macos"
 
 echo
 echo "[4/5] Creating project virtual environment"
@@ -79,9 +83,10 @@ Next steps:
     cd "$PROJECT_DIR"
     source .venv/bin/activate
     python -m mlx_vlm.server \\
-      --model mlx-community/Qwen3.5-2B-OptiQ-4bit \\
-      --port 8090 --host 127.0.0.1 --api-key x \\
-      --prefill-step-size 512
+      --model "\${LITE_MODEL:-mlx-community/Qwen3.5-2B-OptiQ-4bit}" \\
+      --port "\${LITE_SERVER_PORT:-8090}" --host "\${LITE_SERVER_HOST:-127.0.0.1}" \\
+      --api-key "\${LITE_MLX_API_KEY:-x}" \\
+      --prefill-step-size "\${LITE_PREFILL_STEP_SIZE:-512}"
 
   Terminal 2 — start the CLI agent:
     cd "$PROJECT_DIR"

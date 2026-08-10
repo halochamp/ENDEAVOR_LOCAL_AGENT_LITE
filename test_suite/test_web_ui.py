@@ -32,6 +32,45 @@ def test_server_start_does_not_take_over_an_occupied_port(monkeypatch):
     assert "ถูกใช้งานอยู่แล้ว" in payload["error"]
 
 
+def test_server_health_requires_configured_model(monkeypatch):
+    class _Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self, _limit):
+            return json.dumps({"data": [{"id": config.MODEL_ID}]}).encode("utf-8")
+
+    calls = []
+
+    def fake_urlopen(request, timeout):
+        calls.append((request.full_url, timeout))
+        return _Response()
+
+    monkeypatch.setattr(web_ui, "urlopen", fake_urlopen)
+    assert web_ui._mlx_server_up() is True
+    assert calls == [(f"{config.MLX_BASE_URL}/models", 0.75)]
+
+
+def test_server_health_rejects_wrong_model(monkeypatch):
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self, _limit):
+            return b'{"data":[{"id":"wrong-model"}]}'
+
+    monkeypatch.setattr(web_ui, "urlopen", lambda *args, **kwargs: _Response())
+    assert web_ui._mlx_server_up() is False
+
+
 def test_stop_only_terminates_the_server_started_by_this_web_ui(monkeypatch):
     class _Proc:
         pid = 4321
