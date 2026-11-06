@@ -1,6 +1,3 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
 """Conservative normalization for Thai extraction and FTS query text.
 
 PDF/OCR/layout extractors commonly inject arbitrary whitespace inside Thai
@@ -25,6 +22,15 @@ _THAI_MARK_BEFORE_BASE_AFTER_SPACE_RE = re.compile(
 _THAI_CHAR_ON_BOTH_SIDES_SPACE_RE = re.compile(
     r"(?<=[\u0E00-\u0E7F])\s+(?=[\u0E00-\u0E7F])"
 )
+# OCR sometimes emits SARA AM before a following tone mark (e.g. "นำ้").
+# Thai orthography encodes the tone mark before SARA AM ("น้ำ"). This is a
+# structural reorder only: no character is invented, removed, or substituted.
+_THAI_SARA_AM_BEFORE_TONE_RE = re.compile(r"\u0E33([\u0E48-\u0E4B])")
+
+
+def repair_thai_orthographic_order(text: str) -> str:
+    """Repair deterministic Thai mark-order errors without lexical guessing."""
+    return _THAI_SARA_AM_BEFORE_TONE_RE.sub(lambda match: match.group(1) + "ำ", text)
 
 
 def repair_thai_combining_mark_spacing(text: str) -> str:
@@ -42,4 +48,5 @@ def normalize_extracted_text(text: str) -> str:
     """Canonicalize extraction layout while preserving ordinary word spacing."""
     normalized = unicodedata.normalize("NFC", text)
     normalized = _WHITESPACE_RUN_RE.sub(" ", normalized).strip()
-    return repair_thai_combining_mark_spacing(normalized)
+    normalized = repair_thai_combining_mark_spacing(normalized)
+    return repair_thai_orthographic_order(normalized)

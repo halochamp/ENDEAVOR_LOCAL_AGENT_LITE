@@ -1,6 +1,3 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
 """tool_parser.py — parse and validate Qwen3.5's <tool_call> XML format.
 
 Qwen3.5's chat template (see the model's chat_template.jinja) expects tool
@@ -68,7 +65,10 @@ def strip_tool_call(text: str) -> str:
 _PARAM_ALIASES: dict[str, dict[str, str]] = {
     "rag_search": {"command": "query", "search": "query", "keyword": "query", "keywords": "query"},
     "web_search": {"command": "query", "search": "query", "keyword": "query"},
-    "read_file": {"file": "path", "filepath": "path", "file_path": "path"},
+    "read_file": {
+        "file": "path", "filepath": "path", "file_path": "path",
+        "files": "paths", "file_paths": "paths",
+    },
     "write_file": {"file": "path", "filepath": "path", "file_path": "path", "text": "content", "data": "content"},
     "read_image": {"file": "path", "filepath": "path", "image": "path", "image_path": "path"},
     "bash": {"cmd": "command", "query": "command"},
@@ -80,14 +80,12 @@ def apply_param_aliases(call: ToolCall, schemas: dict[str, dict]) -> ToolCall:
     schema = schemas.get(call.name)
     if not aliases or not schema:
         return call
-    required = set(schema.get("parameters", {}).get("required", []))
-    missing = required - set(call.args)
-    if not missing:
-        return call
     new_args = dict(call.args)
     for wrong_name, correct_name in aliases.items():
-        if correct_name in missing and wrong_name in new_args and correct_name not in new_args:
+        if wrong_name in new_args and correct_name not in new_args:
             new_args[correct_name] = new_args.pop(wrong_name)
+    if new_args == call.args:
+        return call
     return ToolCall(name=call.name, args=new_args, raw=call.raw)
 
 

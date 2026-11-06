@@ -1,6 +1,3 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
 """Small dependency-free OOXML fixture builder for document tests."""
 from __future__ import annotations
 

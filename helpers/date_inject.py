@@ -1,6 +1,3 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
 """date_inject.py — deterministic relative-date resolution, injected into the
 per-turn user message rather than trusted to the model.
 

@@ -1,6 +1,3 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
 """react.py — ReAct agent builder, copied-and-trimmed from
 ENDEAVOR_LOCAL_AGENT_MAX_VLM/react.py (2026-07-23, architecture switch — see
 config.py's module docstring).
@@ -59,17 +56,7 @@ def _image_to_data_uri(path: str) -> str | None:
         encoded = base64.b64encode(data).decode("ascii")
         return f"data:{mime};base64,{encoded}"
     except ValueError:
-        pass
-    finally:
-        # These are private, per-turn snapshots.  Even a corrupt/oversize
-        # snapshot must not accumulate if the VLM transport rejects it.
-        try:
-            candidate = Path(path).resolve()
-            candidate.relative_to(config.DATA_DIR / "pending_images")
-            candidate.unlink(missing_ok=True)
-        except (OSError, ValueError):
-            pass
-    return None
+        return None
 
 
 def _inject_pending_images(msgs: list) -> list:
@@ -80,22 +67,22 @@ def _inject_pending_images(msgs: list) -> list:
     turn lock serializes callers while this function consumes it.
     """
     try:
-        pending_paths = _read_image_tool.pop_pending_images()
+        turn_paths = _read_image_tool.active_turn_images()
     except Exception:
-        pending_paths = []
-    if not pending_paths:
+        turn_paths = []
+    if not turn_paths:
         return msgs
 
-    # Do not consume snapshots merely to discover that this graph invocation
-    # has no HumanMessage.  They remain valid for the next model call.
+    # Images are outer-turn state, not one-step state.  Keep them active even
+    # when this particular ReAct invocation has no HumanMessage; a later step
+    # in the same turn may still need the same pixels for final synthesis.
     user_index = next((i for i in range(len(msgs) - 1, -1, -1)
                        if isinstance(msgs[i], HumanMessage)), None)
     if user_index is None:
-        _read_image_tool._PENDING_IMAGES.extend(pending_paths)
         return msgs
 
     img_blocks = []
-    for p in pending_paths:
+    for p in turn_paths:
         uri = _image_to_data_uri(p)
         if uri:
             img_blocks.append({"type": "image_url", "image_url": {"url": uri}})
@@ -103,10 +90,6 @@ def _inject_pending_images(msgs: list) -> list:
         m = msgs[user_index]
         base = m.content if isinstance(m.content, list) else [{"type": "text", "text": m.content}]
         msgs[user_index] = HumanMessage(content=base + img_blocks, id=getattr(m, "id", None))
-        return msgs
-
-    # Invalid/oversize private snapshots were cleaned by _image_to_data_uri.
-    # Do not requeue stale paths indefinitely.
     return msgs
 
 

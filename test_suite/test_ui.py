@@ -1,6 +1,3 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
 """Regression checks for UI-only parsing; no terminal or model is needed."""
 from __future__ import annotations
 
@@ -34,8 +31,12 @@ def test_index_progress_text_includes_counts_and_current_path():
     assert "report.md" in text
 
 
-def test_print_header_handles_a_long_model_name(capsys):
-    ui.print_header("mlx-community/Qwen3-VL-2B-Instruct-4bit", 6)
-    output = capsys.readouterr().out
-    assert "Qwen3-VL-2B-Instruct-4bit" in output
-    assert "6 tools" in output
+def test_sync_kb_progress_text_explains_current_phase_and_estimate():
+    text = ui.sync_kb_progress_text("result", "/Users/test/manual.pdf", {
+        "total_files": 10, "completed_files": 5, "progress_percent": 49.5,
+        "estimated_remaining_seconds": 2.3,
+    })
+    assert "กำลังบันทึกผล" in text
+    assert "ประมาณ 50%" in text
+    assert "5/10 ไฟล์" in text
+    assert "เหลือ ~2.3s" in text

@@ -1,6 +1,3 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
 """summarize_lite.py — extractive (non-LLM) summarization for web_search.
 
 MAX_VLM's tools/_summarize.py calls an LLM (llama3.1:8b) to write a
@@ -66,3 +63,38 @@ def extractive_summary(text: str, query: str, max_chars: int) -> str:
     if len(out) > max_chars:
         out = out[:max_chars].rstrip() + "..."
     return out
+
+
+
+def query_filtered_summary(text: str, query: str, max_chars: int) -> str:
+    """Return only query-matching source passages, bounded and extractive.
+
+    This is intentionally stricter than ``extractive_summary``: a fetched page
+    that has no positive query overlap returns an empty string instead of its
+    first paragraph.  That prevents navigation/boilerplate text from replacing
+    a useful search-engine snippet merely because the HTTP fetch succeeded.
+    """
+    text = (text or "").strip()
+    if not text or max_chars <= 0:
+        return ""
+    terms = query_terms(query)
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n|\n", text) if p.strip()]
+    scored = sorted(
+        (((_score(paragraph, terms)), index, paragraph) for index, paragraph in enumerate(paragraphs)),
+        key=lambda item: (-item[0], item[1]),
+    )
+    picked: list[str] = []
+    used = 0
+    for score, _index, paragraph in scored:
+        if score <= 0:
+            break
+        separator = 1 if picked else 0
+        room = max_chars - used - separator
+        if room <= 0:
+            break
+        piece = paragraph if len(paragraph) <= room else paragraph[:room].rstrip() + "..."
+        picked.append(piece)
+        used += len(piece) + separator
+        if used >= max_chars:
+            break
+    return "\n".join(picked)[:max_chars]

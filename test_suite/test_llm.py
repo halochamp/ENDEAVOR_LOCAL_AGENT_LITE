@@ -1,6 +1,3 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
 """Regression tests for the OpenAI-compatible MLX client boundary."""
 
 from __future__ import annotations
@@ -37,3 +34,18 @@ def test_thinking_can_be_disabled_for_a_specific_call():
 
     assert payload["extra_body"]["enable_thinking"] is False
     assert payload["extra_body"]["thinking_budget"] == config.THINKING_BUDGET
+
+
+def test_effort_profiles_map_to_bounded_thinking_budgets():
+    assert config.DEFAULT_THINKING_EFFORT == "medium"
+    assert config.THINKING_BUDGET_PRESETS == {"low": 128, "medium": 256, "high": 512}
+    assert config.thinking_budget_for_effort("low") == 128
+    assert config.thinking_budget_for_effort("medium") == 256
+    assert config.thinking_budget_for_effort("high") == 512
+    assert config.normalize_thinking_effort("unknown") == "medium"
+
+
+def test_effort_budget_is_sent_to_mlx_vlm_extra_body():
+    payload = _payload(build_llm(extra_body={"thinking_budget": config.thinking_budget_for_effort("high")}))
+
+    assert payload["extra_body"]["thinking_budget"] == 512

@@ -1,15 +1,32 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
 """Agent stream plumbing tests; uses a fake LangGraph graph, never a model."""
 from __future__ import annotations
 
+import json
 import threading
 from types import SimpleNamespace
 
 import agent
 import config
+from helpers import search_scope
 from tools import read_image
+
+
+def _rag_mcp_call(query: str, call_id: str = "rag-mcp") -> dict:
+    return {
+        "name": "mcp_call_tool",
+        "id": call_id,
+        "args": {
+            "server": "lite-rag",
+            "tool_name": "rag_search",
+            "arguments_json": json.dumps({"query": query}, ensure_ascii=False),
+        },
+    }
+
+
+def _rag_mcp_message(call_id: str, content: str, status: str = "success"):
+    return SimpleNamespace(
+        name="mcp_call_tool", tool_call_id=call_id, status=status, content=content,
+    )
 
 
 class _FakeGraph:
@@ -58,6 +75,602 @@ def test_run_turn_reports_live_tool_events_and_keeps_web_result(monkeypatch):
     assert len(history) == 2
 
 
+def test_run_turn_keeps_streaming_transport_for_non_token_callers(monkeypatch):
+    seen = {}
+
+    class _NoToolGraph:
+        def stream(self, _input, *, config, stream_mode):
+            yield {"agent": {"messages": [SimpleNamespace(tool_calls=[], content="ok")]}}
+
+    def fake_get_react_agent(**kwargs):
+        seen.update(kwargs)
+        return _NoToolGraph()
+
+    monkeypatch.setattr(agent, "_get_react_agent", fake_get_react_agent)
+    monkeypatch.setattr(agent, "_log", lambda _event: None)
+
+    result = agent.run_turn("ตอบสั้น ๆ", [], stream_tokens=False)
+
+    assert result.text == "ok"
+    assert seen == {"streaming": True, "thinking_budget": config.THINKING_BUDGET}
+
+
+def test_run_turn_selects_the_requested_effort_budget(monkeypatch):
+    seen = {}
+
+    class _NoToolGraph:
+        def stream(self, _input, *, config, stream_mode):
+            yield {"agent": {"messages": [SimpleNamespace(tool_calls=[], content="ok")]}}
+
+    def fake_get_react_agent(**kwargs):
+        seen.update(kwargs)
+        return _NoToolGraph()
+
+    monkeypatch.setattr(agent, "_get_react_agent", fake_get_react_agent)
+    monkeypatch.setattr(agent, "_log", lambda _event: None)
+
+    result = agent.run_turn("ตอบสั้น ๆ", [], effort="high")
+
+    assert result.text == "ok"
+    assert seen == {"streaming": True, "thinking_budget": 512}
+
+
+def test_boilerplate_fallback_surfaces_verified_tool_result():
+    result = agent._fallback_summary(
+        ["- bash(command=cat /tmp/one.py) -> สำเร็จ", "- cat(path=/tmp/missing.py) -> ล้มเหลว"],
+        "bash",
+        "/tmp/one.py\nprint('ok')",
+    )
+
+    assert "แสดงผลที่ยืนยันได้" in result
+    assert "/tmp/one.py" in result
+    assert "สรุปคำตอบไม่สำเร็จ" not in result
+
+
+def test_mcp_call_shorthand_is_repaired_to_fixed_local_rag():
+    assert agent._normalize_mcp_tool_args(
+        "mcp_call_tool", {"arguments_json": '{"query":"ต่ออายุ"}'},
+    ) == {
+        "arguments_json": '{"query":"ต่ออายุ"}',
+        "server": "lite-rag",
+        "tool_name": "rag_search",
+    }
+
+
+def test_mcp_call_does_not_override_explicit_route():
+    args = {
+        "server": "other",
+        "tool_name": "ping",
+        "arguments_json": "{}",
+    }
+    assert agent._normalize_mcp_tool_args("mcp_call_tool", args) == args
+
+
+def test_local_document_search_query_extracts_content_phrase():
+    assert agent._local_document_search_query(
+        "เอกสารไหนพูดถึงค่าปรับยกเลิกสัญญา และค่าปรับเท่าไร"
+    ) == "ค่าปรับยกเลิกสัญญา"
+    assert agent._local_document_search_query(
+        "หาเอกสารที่มีคำว่า ยอดชำระ 4,500 บาท"
+    ) == "ยอดชำระ 4,500 บาท"
+    assert agent._rag_search_query(
+        "ค้นหาข้อมูลใน rag ที่มีเนื้อหาเกี่ยวกับการ landing"
+    ) == "การ landing"
+    assert agent._rag_search_query("ค้นหาใน rag เรื่อง landing") == "landing"
+    assert agent._rag_search_query("ค้นหาใน rag_document เรื่อง landing") == "landing"
+    assert agent._rag_search_query("ค้นหาใน rag_document/md เรื่อง landing") == "landing"
+    assert agent._rag_search_query(
+        "ดึงข้อมูลจากฐานความรู้เรื่อง landing"
+    ) == "landing"
+
+
+def test_focused_web_queries_do_not_split_thai_about_phrase():
+    assert agent._focused_web_queries(
+        "ค้นหาข่าวล่าสุดเกี่ยวกับ OpenAI"
+    ) == "ข่าว เกี่ยวกับ OpenAI 2026"
+    assert agent._focused_web_queries(
+        "สถานการณ์ล่าสุดเกี่ยวกับไทยกับกัมพูชา"
+    ) == ["ไทย 2026", "กัมพูชา 2026"]
+
+
+def test_local_document_scope_requires_path_as_a_word_not_a_substring():
+    assert search_scope.is_local_document_query("latest pathology research") is False
+    assert search_scope.is_local_document_query("look up multipath networking") is False
+    assert agent._should_force_web_search("latest pathology research") is True
+    assert agent._should_force_web_search("look up multipath networking") is True
+    assert search_scope.is_local_document_query(
+        "show path /Users/example/file.txt"
+    ) is True
+
+
+def test_rag_scope_requires_local_source_intent_not_bare_rag_mention():
+    assert search_scope.is_knowledge_base_query("RAG คืออะไร") is False
+    assert search_scope.is_knowledge_base_query("RAG ทำงานอย่างไร") is False
+    assert search_scope.is_knowledge_base_explanation_query("RAG คืออะไร") is True
+    assert search_scope.is_knowledge_base_query("ค้นหาใน RAG เรื่อง landing") is True
+    assert search_scope.is_knowledge_base_query("ค้นหาใน rag_document เรื่อง landing") is True
+    assert search_scope.is_knowledge_base_query(
+        "ดึงข้อมูลจากฐานความรู้เรื่อง landing"
+    ) is True
+    assert search_scope.is_knowledge_base_query(
+        "ค้นหาบนเว็บเกี่ยวกับ RAG"
+    ) is False
+    assert search_scope.is_outside_knowledge_base_query(
+        "ค้นหานอก RAG เรื่อง landing"
+    ) is True
+    assert search_scope.is_knowledge_base_query(
+        "ค้นหานอก RAG เรื่อง landing"
+    ) is False
+    assert search_scope.is_outside_knowledge_base_query("RAG คืออะไร") is False
+    assert search_scope.is_outside_knowledge_base_query(
+        "ค้นหาบนเว็บนอก RAG เรื่อง landing"
+    ) is False
+    assert agent._outside_rag_search_query(
+        "ค้นหานอก RAG เรื่อง landing"
+    ) == "landing"
+
+
+def test_explanatory_rag_query_does_not_force_web_or_preload_rag(monkeypatch):
+    class _NoToolGraph:
+        def stream(self, _input, *, config, stream_mode):
+            yield {"agent": {"messages": [SimpleNamespace(
+                tool_calls=[], content="RAG คือ Retrieval-Augmented Generation",
+            )]}}
+
+    class _UnexpectedMcp:
+        def __init__(self):
+            self.calls = []
+
+        def invoke(self, args):
+            self.calls.append(args)
+            raise AssertionError("explanatory RAG query must not preload rag_search")
+
+    class _UnexpectedWeb:
+        def __init__(self):
+            self.calls = []
+
+        def invoke(self, args):
+            self.calls.append(args)
+            raise AssertionError("explanatory RAG query must not force web_search")
+
+    fake_mcp = _UnexpectedMcp()
+    fake_web = _UnexpectedWeb()
+    monkeypatch.setattr(agent, "_get_react_agent", lambda **_kwargs: _NoToolGraph())
+    monkeypatch.setattr(agent._mcp_tool, "mcp_call_tool", fake_mcp)
+    monkeypatch.setattr(agent._web_search_tool, "web_search", fake_web)
+    monkeypatch.setattr(agent, "_log", lambda _event: None)
+
+    result = agent.run_turn("RAG คืออะไร", [])
+
+    assert result.text == "RAG คือ Retrieval-Augmented Generation"
+    assert fake_mcp.calls == []
+    assert fake_web.calls == []
+
+
+def test_explicit_outside_rag_scope_forces_bash_before_graph(monkeypatch, tmp_path):
+    class _NoToolGraph:
+        def stream(self, _input, *, config, stream_mode):
+            yield {"agent": {"messages": [SimpleNamespace(
+                tool_calls=[], content="สรุปจากผล bash",
+            )]}}
+
+    class _FakeBash:
+        def __init__(self):
+            self.calls = []
+
+        def invoke(self, args):
+            self.calls.append(args)
+            return "/Users/test/Desktop/manual.txt\n"
+
+    class _UnexpectedTool:
+        def __init__(self):
+            self.calls = []
+
+        def invoke(self, args):
+            self.calls.append(args)
+            raise AssertionError("outside-RAG scope must not use this tool")
+
+    desktop = tmp_path / "Desktop"
+    documents = tmp_path / "Documents"
+    desktop.mkdir()
+    documents.mkdir()
+    fake_bash = _FakeBash()
+    fake_mcp = _UnexpectedTool()
+    fake_web = _UnexpectedTool()
+    monkeypatch.setattr(config, "LOCAL_SEARCH_ROOTS", (desktop, documents))
+    monkeypatch.setattr(agent, "_get_react_agent", lambda **_kwargs: _NoToolGraph())
+    monkeypatch.setattr(agent._bash_tool, "bash", fake_bash)
+    monkeypatch.setattr(agent._mcp_tool, "mcp_call_tool", fake_mcp)
+    monkeypatch.setattr(agent._web_search_tool, "web_search", fake_web)
+    monkeypatch.setattr(agent, "_log", lambda _event: None)
+
+    events = []
+    result = agent.run_turn(
+        "ค้นหานอก RAG เรื่อง landing",
+        [],
+        on_step=lambda **event: events.append(event),
+    )
+
+    from tools import bash
+
+    assert len(fake_bash.calls) == 1
+    assert fake_bash.calls[0]["command"].startswith("grep -r -l -F landing ")
+    assert bash._read_only_violation(fake_bash.calls[0]["command"]) is None
+    assert fake_mcp.calls == []
+    assert fake_web.calls == []
+    assert events[0]["name"] == "bash"
+    assert result.text == "สรุปจากผล bash"
+
+
+def test_local_document_recovery_finishes_when_model_skips_tools(monkeypatch):
+    class _NoToolGraph:
+        def stream(self, _input, *, config, stream_mode):
+            yield {"agent": {"messages": [SimpleNamespace(tool_calls=[], content="") ]}}
+
+    class _FakeMcpCall:
+        def invoke(self, args):
+            assert args["server"] == "lite-rag"
+            assert args["tool_name"] == "rag_search"
+            assert json.loads(args["arguments_json"]) == {"query": "ค่าปรับยกเลิกสัญญา"}
+            return "พบ 1 ไฟล์\n- /project/เงื่อนไขสัญญาเช่า.txt\n  ค่าปรับยกเลิกสัญญา 8,000 บาท"
+
+    monkeypatch.setattr(agent, "_get_react_agent", lambda **_kwargs: _NoToolGraph())
+    monkeypatch.setattr(agent._mcp_tool, "mcp_call_tool", _FakeMcpCall())
+    monkeypatch.setattr(agent, "_log", lambda _event: None)
+
+    events = []
+    result = agent.run_turn(
+        "เอกสารไหนพูดถึงค่าปรับยกเลิกสัญญา และค่าปรับเท่าไร", [],
+        on_step=lambda **event: events.append(event),
+    )
+
+    assert "8,000" in result.text
+    assert any(event.get("name") == "mcp_call_tool" for event in events)
+    assert not result.aborted
+
+
+def test_generic_local_document_recovery_falls_back_to_desktop_documents(monkeypatch):
+    class _NoToolGraph:
+        def stream(self, _input, *, config, stream_mode):
+            yield {"agent": {"messages": [SimpleNamespace(
+                tool_calls=[], content="ไม่พบใน Knowledge Base"
+            )]}}
+
+    class _FakeMcpCall:
+        def invoke(self, args):
+            assert args["tool_name"] == "rag_search"
+            return "ไม่พบเนื้อหาที่ตรงกับ 'อายุการใช้งานกล้อง' ใน Knowledge Base"
+
+    class _FakeLocalSearch:
+        def __init__(self):
+            self.calls = []
+
+        def invoke(self, args):
+            self.calls.append(args)
+            return (
+                "พบ 1 ไฟล์ใน Desktop/Documents ที่มีเนื้อหาตรงกับ 'อายุการใช้งานกล้อง':\n"
+                "- /Users/test/Documents/camera-notes.txt\n"
+                "  (Documents) อายุการใช้งานกล้องขึ้นกับการดูแล"
+            )
+
+    fake_local = _FakeLocalSearch()
+    monkeypatch.setattr(agent, "_get_react_agent", lambda **_kwargs: _NoToolGraph())
+    monkeypatch.setattr(agent._mcp_tool, "mcp_call_tool", _FakeMcpCall())
+    monkeypatch.setattr(agent._local_search_tool, "local_search", fake_local)
+    monkeypatch.setattr(agent, "_log", lambda _event: None)
+
+    result = agent.run_turn("ค้นหาเนื้อหาไฟล์ที่มีเนื้อหาเกี่ยวกับอายุการใช้งานกล้อง", [])
+
+    assert fake_local.calls == [{"query": "อายุการใช้งานกล้อง"}]
+    assert "/Users/test/Documents/camera-notes.txt" in result.text
+    assert "Knowledge Base ว่าง" not in result.text
+    assert not result.aborted
+
+
+def test_explicit_rag_scope_forces_mcp_before_web(monkeypatch):
+    class _NoToolGraph:
+        def stream(self, _input, *, config, stream_mode):
+            yield {"agent": {"messages": [SimpleNamespace(
+                tool_calls=[], content="ตอบจากความจำ",
+            )]}}
+
+    class _FakeMcpCall:
+        def __init__(self):
+            self.calls = []
+
+        def invoke(self, args):
+            self.calls.append(args)
+            return (
+                "พบ 1 ช่วงข้อความที่ตรงกับ 'การ landing':\n"
+                "- ไฟล์: /Users/test/Knowledge/manual.docx\n"
+                "  หน้า/ตำแหน่ง: page 7/20\n"
+                "  [source: /Users/test/Knowledge/manual.docx]\n"
+                "  ตัวอย่างเนื้อหา: ขั้นตอนการ landing"
+            )
+
+    class _UnexpectedWeb:
+        def __init__(self):
+            self.calls = []
+
+        def invoke(self, args):
+            self.calls.append(args)
+            return "- web must not run\n  [source: https://unexpected.test]"
+
+    fake_mcp = _FakeMcpCall()
+    fake_web = _UnexpectedWeb()
+    monkeypatch.setattr(agent, "_get_react_agent", lambda **_kwargs: _NoToolGraph())
+    monkeypatch.setattr(agent._mcp_tool, "mcp_call_tool", fake_mcp)
+    monkeypatch.setattr(agent._web_search_tool, "web_search", fake_web)
+    monkeypatch.setattr(agent, "_log", lambda _event: None)
+
+    events = []
+    result = agent.run_turn(
+        "ค้นหาข้อมูลใน rag ที่มีเนื้อหาเกี่ยวกับการ landing",
+        [],
+        on_step=lambda **event: events.append(event),
+    )
+
+    assert len(fake_mcp.calls) == 1
+    assert json.loads(fake_mcp.calls[0]["arguments_json"]) == {"query": "การ landing"}
+    assert fake_web.calls == []
+    assert any(
+        event.get("name") == "mcp_call_tool" for event in events
+    )
+    assert not any(event.get("name") == "web_search" for event in events)
+    assert "แหล่งที่มา (Knowledge Base):" in result.text
+    assert "page 7/20" in result.text
+    assert "รายละเอียดตัวเลขจากข้อความในเอกสาร" not in result.text
+
+
+def test_explicit_rag_scope_falls_back_to_bash_when_mcp_unavailable(monkeypatch, tmp_path):
+    knowledge = tmp_path / "Knowledge"
+    knowledge.mkdir()
+
+    class _NoToolGraph:
+        def stream(self, _input, *, config, stream_mode):
+            yield {"agent": {"messages": [SimpleNamespace(
+                tool_calls=[], content="ไม่พบข้อมูล",
+            )]}}
+
+    class _UnavailableMcp:
+        def __init__(self):
+            self.calls = []
+
+        def invoke(self, args):
+            self.calls.append(args)
+            return "[error] mcp_call_tool failed for 'lite-rag' (FileNotFoundError)"
+
+    class _FakeBash:
+        def __init__(self):
+            self.calls = []
+
+        def invoke(self, args):
+            self.calls.append(args)
+            return str(knowledge / "manual.txt")
+
+    class _UnexpectedWeb:
+        def invoke(self, _args):
+            raise AssertionError("web_search must not replace local RAG data")
+
+    fake_mcp = _UnavailableMcp()
+    fake_bash = _FakeBash()
+    monkeypatch.setattr(config, "KNOWLEDGE_DIR", knowledge)
+    monkeypatch.setattr(agent, "_get_react_agent", lambda **_kwargs: _NoToolGraph())
+    monkeypatch.setattr(agent._mcp_tool, "mcp_call_tool", fake_mcp)
+    monkeypatch.setattr(agent._bash_tool, "bash", fake_bash)
+    monkeypatch.setattr(agent._web_search_tool, "web_search", _UnexpectedWeb())
+    monkeypatch.setattr(agent, "_log", lambda _event: None)
+
+    result = agent.run_turn("ค้นหาข้อมูลใน RAG เรื่อง landing", [])
+
+    assert len(fake_mcp.calls) == 1
+    assert len(fake_bash.calls) == 1
+    assert str(knowledge) in fake_bash.calls[0]["command"]
+    assert "landing" in fake_bash.calls[0]["command"]
+    assert "ผลการค้นหาใน Knowledge Base ด้วย bash:" in result.text
+    assert str(knowledge / "manual.txt") in result.text
+    assert not result.aborted
+
+
+def test_generic_local_search_uses_bash_when_rag_mcp_unavailable(monkeypatch, tmp_path):
+    desktop = tmp_path / "Desktop"
+    documents = tmp_path / "Documents"
+    desktop.mkdir()
+    documents.mkdir()
+
+    class _NoToolGraph:
+        def stream(self, _input, *, config, stream_mode):
+            yield {"agent": {"messages": [SimpleNamespace(
+                tool_calls=[], content="ไม่พบข้อมูล",
+            )]}}
+
+    class _UnavailableMcp:
+        def invoke(self, _args):
+            return "[error] no MCP server named 'lite-rag' configured"
+
+    class _FakeBash:
+        def __init__(self):
+            self.calls = []
+
+        def invoke(self, args):
+            self.calls.append(args)
+            return str(documents / "camera.txt")
+
+    class _UnexpectedLocalSearch:
+        def invoke(self, _args):
+            raise AssertionError("local_search must not replace the requested bash fallback")
+
+    fake_bash = _FakeBash()
+    monkeypatch.setattr(config, "LOCAL_SEARCH_ROOTS", (desktop, documents))
+    monkeypatch.setattr(agent, "_get_react_agent", lambda **_kwargs: _NoToolGraph())
+    monkeypatch.setattr(agent._mcp_tool, "mcp_call_tool", _UnavailableMcp())
+    monkeypatch.setattr(agent._bash_tool, "bash", fake_bash)
+    monkeypatch.setattr(agent._local_search_tool, "local_search", _UnexpectedLocalSearch())
+    monkeypatch.setattr(agent, "_log", lambda _event: None)
+
+    result = agent.run_turn("ค้นหาเนื้อหาไฟล์ที่มีเนื้อหาเกี่ยวกับอายุการใช้งานกล้อง", [])
+
+    assert len(fake_bash.calls) == 1
+    command = fake_bash.calls[0]["command"]
+    assert str(desktop) in command and str(documents) in command
+    assert "อายุการใช้งานกล้อง" in command
+    assert "ผลการค้นหาใน Desktop/Documents ด้วย bash:" in result.text
+    assert str(documents / "camera.txt") in result.text
+    assert not result.aborted
+
+
+def test_explicit_web_scope_about_rag_keeps_web_route(monkeypatch):
+    class _NoToolGraph:
+        def stream(self, _input, *, config, stream_mode):
+            yield {"agent": {"messages": [SimpleNamespace(
+                tool_calls=[], content="ตอบจากความจำ",
+            )]}}
+
+    class _FakeWebSearch:
+        def __init__(self):
+            self.calls = []
+
+        def invoke(self, args):
+            self.calls.append(args)
+            return "- Web evidence\n  [source: https://example.test/rag]"
+
+    fake_web = _FakeWebSearch()
+    monkeypatch.setattr(agent, "_get_react_agent", lambda **_kwargs: _NoToolGraph())
+    monkeypatch.setattr(agent._web_search_tool, "web_search", fake_web)
+    monkeypatch.setattr(agent, "_log", lambda _event: None)
+
+    result = agent.run_turn("ค้นหาบนเว็บเกี่ยวกับ rag implementation", [])
+
+    assert fake_web.calls
+    assert "https://example.test/rag" in result.text
+
+
+def test_local_fact_recovery_restores_numeric_detail_dropped_by_model(monkeypatch):
+    class _Graph:
+        def stream(self, _input, *, config, stream_mode):
+            args = _rag_mcp_call("ค่าปรับยกเลิกสัญญา", "rag-1")
+            yield {"agent": {"messages": [SimpleNamespace(tool_calls=[args])]}}
+            yield {"tools": {"messages": [_rag_mcp_message(
+                "rag-1",
+                "พบ 1 ไฟล์\n- /project/เงื่อนไขสัญญาเช่า.txt\n"
+                "  (เงื่อนไขสัญญาเช่า.txt) ค่าปรับยกเลิกสัญญา 8,000 บาท",
+            )]}}
+            yield {"agent": {"messages": [SimpleNamespace(
+                tool_calls=[], content="พบเอกสารเงื่อนไขสัญญาเช่า.txt",
+            )]}}
+
+    monkeypatch.setattr(agent, "_get_react_agent", lambda **_kwargs: _Graph())
+    monkeypatch.setattr(agent, "_log", lambda _event: None)
+    result = agent.run_turn(
+        "เอกสารไหนพูดถึงค่าปรับยกเลิกสัญญา และค่าปรับเท่าไร", [],
+    )
+
+    assert "8,000" in result.text
+    assert not result.aborted
+
+
+def test_web_boilerplate_fallback_uses_best_vetted_result(monkeypatch):
+    class _Graph:
+        def stream(self, _input, *, config, stream_mode):
+            first = {"name": "web_search", "id": "web-1", "args": {"query": "rate"}}
+            second = {"name": "web_search", "id": "web-2", "args": {"query": "rate tomorrow"}}
+            yield {"agent": {"messages": [SimpleNamespace(tool_calls=[first])]}}
+            yield {"tools": {"messages": [SimpleNamespace(
+                name="web_search", tool_call_id="web-1", status="success",
+                content="- Official rate\n  [source: https://bot.example/rate]",
+            )]}}
+            agent.turn_guard.record(
+                "web_search", {"query": "rate"},
+                "- Official rate\n  [source: https://bot.example/rate]",
+            )
+            yield {"agent": {"messages": [SimpleNamespace(tool_calls=[second])]}}
+            yield {"tools": {"messages": [SimpleNamespace(
+                name="web_search", tool_call_id="web-2", status="success",
+                content="[needs_retry] refine query",
+            )]}}
+            agent.turn_guard.record("web_search", {"query": "rate tomorrow"}, "[needs_retry] refine query")
+            yield {"agent": {"messages": [SimpleNamespace(
+                tool_calls=[], content="Sorry, need more steps to process this request.",
+            )]}}
+
+    monkeypatch.setattr(agent, "_get_react_agent", lambda **_kwargs: _Graph())
+    monkeypatch.setattr(agent, "_log", lambda _event: None)
+    result = agent.run_turn("ค้นหาอัตราดอกเบี้ยล่าสุด", [])
+
+    assert "Official rate" in result.text
+    assert "[needs_retry]" not in result.text
+    assert result.text.endswith("แหล่งที่มา:\n- https://bot.example/rate")
+
+
+def test_web_search_is_blocked_for_local_document_turn():
+    from helpers import turn_guard
+    from tools import web_search
+
+    turn_guard.reset("เอกสารไหนพูดถึงค่าปรับยกเลิกสัญญา")
+    result = web_search.web_search.invoke({"query": "ค่าปรับยกเลิกสัญญา"})
+
+    assert result.startswith("[blocked]")
+    assert "mcp_call_tool" in result
+
+
+def test_web_search_is_blocked_for_explicit_rag_scope():
+    from helpers import turn_guard
+    from tools import web_search
+
+    query = "ค้นหาข้อมูลใน rag ที่มีเนื้อหาเกี่ยวกับการ landing"
+    turn_guard.reset(query)
+    result = web_search.web_search.invoke({"query": "การ landing"})
+
+    assert result.startswith("[blocked]")
+    assert "Knowledge Base/RAG" in result
+    assert "mcp_call_tool" in result
+
+
+def test_mcp_rag_search_is_blocked_for_explanatory_rag_question():
+    from helpers import turn_guard
+    from tools import mcp_client
+
+    turn_guard.reset("RAG คืออะไร")
+    result = mcp_client.mcp_call_tool.invoke({
+        "server": "lite-rag",
+        "tool_name": "rag_search",
+        "arguments_json": '{"query":"คืออะไร"}',
+    })
+
+    assert result.startswith("[blocked]")
+    assert "ความหมายหรือการทำงานของ RAG" in result
+
+
+def test_web_search_is_blocked_for_explanatory_rag_question():
+    from helpers import turn_guard
+    from tools import web_search
+
+    turn_guard.reset("RAG คืออะไร")
+    result = web_search.web_search.invoke({"query": "RAG คืออะไร"})
+
+    assert result.startswith("[blocked]")
+    assert "ไม่ใช่คำขอค้นเว็บ" in result
+
+
+def test_mcp_and_web_are_blocked_for_explicit_outside_rag_scope():
+    from helpers import turn_guard
+    from tools import mcp_client, web_search
+
+    query = "ค้นหานอก RAG เรื่อง landing"
+    turn_guard.reset(query)
+    rag_result = mcp_client.mcp_call_tool.invoke({
+        "server": "lite-rag",
+        "tool_name": "rag_search",
+        "arguments_json": '{"query":"landing"}',
+    })
+    web_result = web_search.web_search.invoke({"query": "landing"})
+
+    assert rag_result.startswith("[blocked]")
+    assert "ต้องใช้ bash" in rag_result
+    assert web_result.startswith("[blocked]")
+    assert "ต้องใช้ bash" in web_result
+
+
 def test_missed_web_route_is_recovered_with_source_grounded_call(monkeypatch):
     class _NoToolGraph:
         def stream(self, _input, *, config, stream_mode):
@@ -79,6 +692,63 @@ def test_missed_web_route_is_recovered_with_source_grounded_call(monkeypatch):
         {"event": "tool_start", "name": "web_search", "args": {"query": "ช่วยค้นหาว่า Python 3.13 มีฟีเจอร์ใหม่อะไรบ้าง พร้อมแนบลิงก์ที่มา"}},
         {"event": "tool_done", "name": "web_search", "ok": True},
     ]
+    assert "https://docs.python.org/3/whatsnew/3.13.html" in result.text
+
+
+def test_current_thai_question_forces_code_owned_web_search(monkeypatch):
+    class _NoToolGraph:
+        def stream(self, _input, *, config, stream_mode):
+            yield {"agent": {"messages": [SimpleNamespace(tool_calls=[], content="ตอบจากความจำ")]}}
+
+    class _FakeWebSearch:
+        def __init__(self):
+            self.calls = []
+
+        def invoke(self, args):
+            self.calls.append(args)
+            return "- Evidence\n  [source: https://example.com/current]"
+
+    fake_web = _FakeWebSearch()
+    monkeypatch.setattr(agent, "_get_react_agent", lambda **_kwargs: _NoToolGraph())
+    monkeypatch.setattr(agent._web_search_tool, "web_search", fake_web)
+    monkeypatch.setattr(agent, "_log", lambda _event: None)
+
+    query = "บรรยากาศสงครามและการลงทุนโลกตอนนี้เป็นอย่างไร"
+    result = agent.run_turn(query, [])
+
+    assert agent._should_force_web_search(query) is True
+    assert fake_web.calls == [{"query": [
+        f"ความขัดแย้งระหว่างประเทศ {agent.date.today().year}",
+        f"การลงทุนโลก {agent.date.today().year}",
+    ]}]
+    assert "https://example.com/current" in result.text
+
+
+def test_bare_search_followup_reuses_prior_subject(monkeypatch):
+    class _NoToolGraph:
+        def stream(self, _input, *, config, stream_mode):
+            yield {"agent": {"messages": [SimpleNamespace(tool_calls=[], content="ตอบจากความจำ")]}}
+
+    class _FakeWebSearch:
+        def __init__(self):
+            self.calls = []
+
+        def invoke(self, args):
+            self.calls.append(args)
+            return "- Python release notes\n  [source: https://docs.python.org/3/whatsnew/3.13.html]"
+
+    fake_web = _FakeWebSearch()
+    monkeypatch.setattr(agent, "_get_react_agent", lambda **_kwargs: _NoToolGraph())
+    monkeypatch.setattr(agent._web_search_tool, "web_search", fake_web)
+    monkeypatch.setattr(agent, "_log", lambda _event: None)
+    original = "Python 3.13 release notes"
+    history = [{"role": "user", "content": original}, {"role": "assistant", "content": "คำตอบเดิม"}]
+
+    result = agent.run_turn("คุณไปค้นหาก่อนตอบสิ", history)
+
+    assert agent._is_web_search_followup("คุณไปค้นหาก่อนตอบสิ") is True
+    assert agent._web_search_subject("คุณไปค้นหาก่อนตอบสิ", history[:2]) == original
+    assert fake_web.calls == [{"query": original}]
     assert "https://docs.python.org/3/whatsnew/3.13.html" in result.text
 
 
@@ -153,15 +823,12 @@ def test_destructive_command_request_has_explicit_blocked_answer(monkeypatch):
 def test_project_content_evidence_replaces_model_no_result(monkeypatch):
     class _Graph:
         def stream(self, _input, *, config, stream_mode):
-            yield {"agent": {"messages": [SimpleNamespace(tool_calls=[{
-                "name": "rag_search", "args": {"query": "tool loop"},
-            }])]}}
-            yield {"tools": {"messages": [SimpleNamespace(
-                name="rag_search", status="success",
-                content=(
-                    "[ค้นจากเนื้อหาในโปรเจกต์ปัจจุบัน: /project]\\n"
-                    "พบ 1 ไฟล์\\n- /project/agent.py\\n  (agent.py) ...tool loop..."
-                ),
+            call = _rag_mcp_call("tool loop", "rag-project")
+            yield {"agent": {"messages": [SimpleNamespace(tool_calls=[call])]}}
+            yield {"tools": {"messages": [_rag_mcp_message(
+                "rag-project",
+                "[ค้นจากเนื้อหาในโปรเจกต์ปัจจุบัน: /project]\\n"
+                "พบ 1 ไฟล์\\n- /project/agent.py\\n  (agent.py) ...tool loop...",
             )]}}
             yield {"agent": {"messages": [SimpleNamespace(
                 tool_calls=[], content="ไม่พบผลลัพธ์ที่อยู่ในโปรเจกต์ปัจจุบัน"
@@ -176,22 +843,29 @@ def test_project_content_evidence_replaces_model_no_result(monkeypatch):
     assert result.aborted is False
     assert "/project/agent.py" in result.text
 
-
 def test_project_rag_evidence_survives_later_tool_loop(monkeypatch):
     class _Graph:
         def stream(self, _input, *, config, stream_mode):
-            rag_call = {"name": "rag_search", "args": {"query": "kMDItemFSName"}}
+            rag_call = _rag_mcp_call("kMDItemFSName", "rag-loop")
             bash_call = {"name": "bash", "args": {"command": "grep -n kMDItemFSName /project"}}
             yield {"agent": {"messages": [SimpleNamespace(tool_calls=[rag_call])]}}
-            yield {"tools": {"messages": [SimpleNamespace(
-                name="rag_search", status="success",
-                content="พบ 2 ไฟล์ที่ตรงกับ 'kMDItemFSName':\\n- /project/tools/bash.py\\n- /project/prompts.py",
+            yield {"tools": {"messages": [_rag_mcp_message(
+                "rag-loop",
+                "พบ 2 ไฟล์ที่ตรงกับ 'kMDItemFSName':\n- /project/tools/bash.py\n- /project/prompts.py",
             )]}}
             yield {"agent": {"messages": [SimpleNamespace(tool_calls=[bash_call])]}}
             yield {"tools": {"messages": [SimpleNamespace(
-                name="bash", status="success", content="/project/tools/bash.py\\n/project/prompts.py",
+                name="bash", status="success", content="/project/tools/bash.py\n/project/prompts.py",
             )]}}
+            # First exact duplicate reaches the wrapper and returns its hint.
             yield {"agent": {"messages": [SimpleNamespace(tool_calls=[bash_call])]}}
+            yield {"tools": {"messages": [SimpleNamespace(
+                name="bash", status="success",
+                content="[error] bash ถูกเรียกด้วย command เดิมติดต่อกัน\n[hint] เปลี่ยน command จริง",
+            )]}}
+            # Ignoring the hint and emitting the same call once more hard-stops.
+            yield {"agent": {"messages": [SimpleNamespace(tool_calls=[bash_call])]}}
+            raise AssertionError("third identical call should stop before this point")
 
     monkeypatch.setattr(agent, "_get_react_agent", lambda **_kwargs: _Graph())
     monkeypatch.setattr(agent, "_log", lambda _event: None)
@@ -203,16 +877,15 @@ def test_project_rag_evidence_survives_later_tool_loop(monkeypatch):
 def test_model_shortened_rag_paths_are_restored_as_absolute_paths(monkeypatch):
     class _Graph:
         def stream(self, _input, *, config, stream_mode):
-            yield {"agent": {"messages": [SimpleNamespace(tool_calls=[{
-                "name": "rag_search", "args": {"query": "syllabus"},
-            }])]}}
-            yield {"tools": {"messages": [SimpleNamespace(
-                name="rag_search", status="success",
+            call = _rag_mcp_call("syllabus", "rag-syllabus-1")
+            yield {"agent": {"messages": [SimpleNamespace(tool_calls=[call])]}}
+            yield {"tools": {"messages": [_rag_mcp_message(
+                "rag-syllabus-1",
                 content=(
                     "พบ 3 ไฟล์ที่ตรงกับ 'syllabus':\n"
-                    "- /Users/halochampmac/Desktop/6 Syllabus/syllabus ฝป.docx\n"
-                    "- /Users/halochampmac/Desktop/6 Syllabus/syllabus ฝค.pdf\n"
-                    "- /Users/halochampmac/Desktop/6 Syllabus/syllabus ฝป.pdf"
+                    "- /Users/test/Desktop/6 Syllabus/syllabus ฝป.docx\n"
+                    "- /Users/test/Desktop/6 Syllabus/syllabus ฝค.pdf\n"
+                    "- /Users/test/Desktop/6 Syllabus/syllabus ฝป.pdf"
                 ),
             )]}}
             yield {"agent": {"messages": [SimpleNamespace(
@@ -221,7 +894,7 @@ def test_model_shortened_rag_paths_are_restored_as_absolute_paths(monkeypatch):
                     "ไฟล์ทั้งหมด:\n"
                     "- syllabus ฝป.docx (Word)\n"
                     "- syllabus ฝค.pdf (PDF)\n"
-                    "- /Users/halochampmac/Desktop/6 Syllabus/syllabus ฝป..pdf (PDF)"
+                    "- /Users/test/Desktop/6 Syllabus/syllabus ฝป..pdf (PDF)"
                 ),
             )]}}
 
@@ -229,24 +902,23 @@ def test_model_shortened_rag_paths_are_restored_as_absolute_paths(monkeypatch):
     monkeypatch.setattr(agent, "_log", lambda _event: None)
     result = agent.run_turn("ค้นหาไฟล์ syllabus", [])
     assert result.aborted is False
-    assert "/Users/halochampmac/Desktop/6 Syllabus/syllabus ฝป.docx (Word)" in result.text
-    assert "/Users/halochampmac/Desktop/6 Syllabus/syllabus ฝค.pdf (PDF)" in result.text
-    assert "/Users/halochampmac/Desktop/6 Syllabus/syllabus ฝป.pdf (PDF)" in result.text
+    assert "/Users/test/Desktop/6 Syllabus/syllabus ฝป.docx (Word)" in result.text
+    assert "/Users/test/Desktop/6 Syllabus/syllabus ฝค.pdf (PDF)" in result.text
+    assert "/Users/test/Desktop/6 Syllabus/syllabus ฝป.pdf (PDF)" in result.text
     assert "ฝป..pdf" not in result.text
 
 
 def test_model_relative_rag_paths_are_restored_as_absolute_paths(monkeypatch):
     class _Graph:
         def stream(self, _input, *, config, stream_mode):
-            yield {"agent": {"messages": [SimpleNamespace(tool_calls=[{
-                "name": "rag_search", "args": {"query": "syllabus"},
-            }])]}}
-            yield {"tools": {"messages": [SimpleNamespace(
-                name="rag_search", status="success",
+            call = _rag_mcp_call("syllabus", "rag-syllabus-2")
+            yield {"agent": {"messages": [SimpleNamespace(tool_calls=[call])]}}
+            yield {"tools": {"messages": [_rag_mcp_message(
+                "rag-syllabus-2",
                 content=(
                     "พบ 2 ไฟล์ที่ตรงกับ 'syllabus':\n"
-                    "- /Users/halochampmac/Desktop/6 Syllabus/Syllabus 402.xlsx\n"
-                    "- /Users/halochampmac/Desktop/6 Syllabus/syllabus ฝป.pdf"
+                    "- /Users/test/Desktop/6 Syllabus/Syllabus 402.xlsx\n"
+                    "- /Users/test/Desktop/6 Syllabus/syllabus ฝป.pdf"
                 ),
             )]}}
             yield {"agent": {"messages": [SimpleNamespace(
@@ -261,12 +933,12 @@ def test_model_relative_rag_paths_are_restored_as_absolute_paths(monkeypatch):
     monkeypatch.setattr(agent, "_log", lambda _event: None)
     result = agent.run_turn("ค้นหาไฟล์ syllabus", [])
     assert result.aborted is False
-    assert "/Users/halochampmac/Desktop/6 Syllabus/Syllabus 402.xlsx (Excel)" in result.text
-    assert "/Users/halochampmac/Desktop/6 Syllabus/syllabus ฝป.pdf (PDF)" in result.text
+    assert "/Users/test/Desktop/6 Syllabus/Syllabus 402.xlsx (Excel)" in result.text
+    assert "/Users/test/Desktop/6 Syllabus/syllabus ฝป.pdf (PDF)" in result.text
     assert "เอกสารเก่า Syllabus/" not in result.text
 
 
-def test_exact_duplicate_tool_call_stops_graph_before_another_execution(monkeypatch):
+def test_exact_duplicate_bash_gets_one_wrapper_hint_before_hard_stop(monkeypatch):
     class _RepeatingGraph:
         def stream(self, _input, *, config, stream_mode):
             call = {"name": "bash", "args": {"command": "find /tmp -type f"}}
@@ -274,8 +946,14 @@ def test_exact_duplicate_tool_call_stops_graph_before_another_execution(monkeypa
             yield {"tools": {"messages": [SimpleNamespace(
                 name="bash", status="success", content="[blocked] test rejection",
             )]}}
+            # Second identical call must reach the wrapper so the model sees a hint.
             yield {"agent": {"messages": [SimpleNamespace(tool_calls=[call])]}}
-            raise AssertionError("duplicate call should stop the graph before this point")
+            yield {"tools": {"messages": [SimpleNamespace(
+                name="bash", status="success",
+                content="[error] bash ถูกเรียกด้วย command เดิมติดต่อกัน\n[hint] เปลี่ยน command จริง",
+            )]}}
+            yield {"agent": {"messages": [SimpleNamespace(tool_calls=[call])]}}
+            raise AssertionError("third identical call should stop before this point")
 
     monkeypatch.setattr(agent, "_get_react_agent", lambda **_kwargs: _RepeatingGraph())
     monkeypatch.setattr(agent, "_log", lambda _event: None)
@@ -288,10 +966,12 @@ def test_exact_duplicate_tool_call_stops_graph_before_another_execution(monkeypa
     assert events == [
         {"event": "tool_start", "name": "bash", "args": {"command": "find /tmp -type f"}},
         {"event": "tool_done", "name": "bash", "ok": False},
+        {"event": "tool_start", "name": "bash", "args": {"command": "find /tmp -type f"}},
+        {"event": "tool_done", "name": "bash", "ok": False},
     ]
 
 
-def test_successful_duplicate_search_finishes_from_first_result(monkeypatch):
+def test_successful_duplicate_search_recovers_first_result_after_ignored_hint(monkeypatch):
     class _RepeatingAfterSuccessGraph:
         def stream(self, _input, *, config, stream_mode):
             call = {"name": "bash", "args": {"command": "find /tmp -type f"}}
@@ -300,7 +980,12 @@ def test_successful_duplicate_search_finishes_from_first_result(monkeypatch):
                 name="bash", status="success", content="/tmp/one.pdf",
             )]}}
             yield {"agent": {"messages": [SimpleNamespace(tool_calls=[call])]}}
-            raise AssertionError("successful duplicate should finish from the first result")
+            yield {"tools": {"messages": [SimpleNamespace(
+                name="bash", status="success",
+                content="[error] bash ถูกเรียกด้วย command เดิมติดต่อกัน\n[hint] เปลี่ยน command จริง",
+            )]}}
+            yield {"agent": {"messages": [SimpleNamespace(tool_calls=[call])]}}
+            raise AssertionError("third identical call should stop before this point")
 
     monkeypatch.setattr(agent, "_get_react_agent", lambda **_kwargs: _RepeatingAfterSuccessGraph())
     monkeypatch.setattr(agent, "_log", lambda _event: None)
@@ -344,11 +1029,10 @@ def test_local_document_policy_leaves_search_term_to_agent(monkeypatch):
             supplied = graph_input["messages"]
             assert len(supplied) == 1
             assert not getattr(supplied[-1], "name", None)
-            yield {"agent": {"messages": [SimpleNamespace(tool_calls=[{
-                "name": "rag_search", "args": {"query": "กล้อง"},
-            }])]} }
-            yield {"tools": {"messages": [SimpleNamespace(
-                name="rag_search", status="success", content="พบไฟล์กล้อง"
+            call = _rag_mcp_call("กล้อง", "rag-local")
+            yield {"agent": {"messages": [SimpleNamespace(tool_calls=[call])]} }
+            yield {"tools": {"messages": [_rag_mcp_message(
+                "rag-local", "พบไฟล์กล้อง"
             )]}}
             yield {"agent": {"messages": [SimpleNamespace(tool_calls=[], content="ใช้ผล RAG แล้ว")]}}
 
@@ -364,8 +1048,16 @@ def test_local_document_policy_leaves_search_term_to_agent(monkeypatch):
 
     assert result.text == "ใช้ผล RAG แล้ว"
     assert events == [
-        {"event": "tool_start", "name": "rag_search", "args": {"query": "กล้อง"}},
-        {"event": "tool_done", "name": "rag_search", "ok": True},
+        {
+            "event": "tool_start",
+            "name": "mcp_call_tool",
+            "args": {
+                "server": "lite-rag",
+                "tool_name": "rag_search",
+                "arguments_json": json.dumps({"query": "กล้อง"}, ensure_ascii=False),
+            },
+        },
+        {"event": "tool_done", "name": "mcp_call_tool", "ok": True},
     ]
 
 
@@ -394,6 +1086,38 @@ def test_source_links_are_rendered_by_code_not_copied_model_text(monkeypatch):
     assert result.text.endswith("แหล่งที่มา:\n- https://example.com/relevant")
 
 
+def test_rag_source_paths_are_rendered_by_code_with_chunk_location(monkeypatch):
+    class _Graph:
+        def stream(self, _input, *, config, stream_mode):
+            call = _rag_mcp_call("กล้อง", "rag-source-1")
+            yield {"agent": {"messages": [SimpleNamespace(tool_calls=[call])]}}
+            yield {"tools": {"messages": [_rag_mcp_message(
+                "rag-source-1",
+                (
+                    "พบ 1 ช่วงข้อความที่ตรงกับ 'กล้อง':\n"
+                    "- ไฟล์: /Users/test/Desktop/manual.pdf\n"
+                    "  ชื่อไฟล์: manual.pdf\n"
+                    "  หน้า/ตำแหน่ง: page 4/9\n"
+                    "  [source: /Users/test/Desktop/manual.pdf]\n"
+                    "  ตัวอย่างเนื้อหา: กล้องมีอายุการใช้งานห้าปี"
+                ),
+            )]}}
+            yield {"agent": {"messages": [SimpleNamespace(
+                tool_calls=[], content="กล้องมีข้อมูลในคู่มือครับ",
+            )]}}
+
+    monkeypatch.setattr(agent, "_get_react_agent", lambda **_kwargs: _Graph())
+    monkeypatch.setattr(agent, "_log", lambda _event: None)
+
+    result = agent.run_turn("เอกสารไหนพูดถึงกล้อง", [])
+
+    assert "[source:" not in result.text
+    assert result.text.endswith(
+        "แหล่งที่มา (Knowledge Base):\n"
+        "- /Users/test/Desktop/manual.pdf — page 4/9"
+    )
+
+
 def test_web_claims_are_blocked_when_no_relevant_source_survives(monkeypatch):
     class _Graph:
         def stream(self, _input, *, config, stream_mode):
@@ -410,6 +1134,11 @@ def test_web_claims_are_blocked_when_no_relevant_source_survives(monkeypatch):
 
     monkeypatch.setattr(agent, "_get_react_agent", lambda **_kwargs: _Graph())
     monkeypatch.setattr(agent, "_log", lambda _event: None)
+    monkeypatch.setattr(
+        agent._web_search_tool,
+        "web_search",
+        type("_NoEvidence", (), {"invoke": lambda _self, _args: "[needs_retry] no relevant results"})(),
+    )
 
     result = agent.run_turn("ดอกเบี้ยล่าสุด", [])
 
@@ -640,7 +1369,7 @@ def test_run_turn_pre_reads_an_image_path_before_model_routing(monkeypatch):
 def test_run_turn_discards_abandoned_private_image_snapshot(monkeypatch):
     pending = config.DATA_DIR / "pending_images"
     pending.mkdir(parents=True, exist_ok=True)
-    snapshot = pending / "abandoned-for-test.png"
+    snapshot = pending / "pending-image-abandoned-for-test.png"
 
     class _CrashGraph:
         def stream(self, *_args, **_kwargs):
@@ -706,3 +1435,30 @@ def test_explicit_image_text_request_uses_grounded_ocr():
 def test_visual_description_does_not_replace_vlm_with_ocr():
     tool_result = "[OCR] ข้อความในภาพ:\nSALE\n[หมายเหตุ] ภาพถูกส่งเข้า context แล้ว"
     assert agent._ground_image_text_answer("ภาพเป็นร้านค้า", tool_result, "บรรยายภาพนี้") == "ภาพเป็นร้านค้า"
+
+
+def test_runtime_machine_hint_is_derived_from_current_process_account():
+    import os
+    import pwd
+    from pathlib import Path
+    import prompts
+
+    account = pwd.getpwuid(os.getuid())
+    assert config.RUNTIME_USER == account.pw_name
+    assert config.RUNTIME_HOME == Path(account.pw_dir).resolve()
+    assert str(config.RUNTIME_HOME) in prompts.SYSTEM_PROMPT
+    assert str(config.RUNTIME_DESKTOP) in prompts.SYSTEM_PROMPT
+    assert str(config.PROJECT_ROOT) in prompts.SYSTEM_PROMPT
+    assert "ห้ามเดา username" in prompts.SYSTEM_PROMPT
+    if config.RUNTIME_OS == "Darwin":
+        assert "macOS/BSD" in prompts.SYSTEM_PROMPT
+
+
+def test_default_tool_recovery_budgets_are_ten_without_env_override():
+    import os
+
+    if "LITE_MAX_TOOL_STEPS" not in os.environ:
+        assert config.MAX_TOOL_STEPS == 10
+    if "LITE_MAX_CALLS_PER_TOOL" not in os.environ:
+        assert config.MAX_CALLS_PER_TOOL == 10
+    assert agent._RECURSION_LIMIT == config.MAX_TOOL_STEPS * 2 + 2

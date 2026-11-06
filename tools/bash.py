@@ -1,6 +1,3 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
 """tools/bash.py — trimmed from ENDEAVOR_LOCAL_AGENT_MAX_VLM/tools/bash.py.
 
 Kept: deny-list against destructive commands, timeout with partial-output
@@ -25,7 +22,7 @@ import config
 from helpers import search_scope
 from helpers.guardrails import truncate_output
 from helpers.save_output import save_full_output
-from helpers.sensitive_paths import contains_secret_content, is_sensitive_path, path_is_or_contains_secret
+from helpers.sensitive_paths import contains_secret_content, is_sensitive_path
 
 SCHEMA = {
     "type": "function",
@@ -44,7 +41,8 @@ SCHEMA = {
             "Run a read-only-oriented bash command (find, grep, ls, cat, wc, etc.) to "
             "search or inspect files/processes on this Mac. Destructive commands "
             "(rm, sudo, disk-wiping, etc.) are blocked. Project file operands must "
-            "use absolute paths; relative paths resolve inside the private workspect."
+            "use absolute paths; relative paths resolve inside the private workspect. "
+            "If a retry is needed, change the command materially; never repeat it verbatim."
         ),
         "parameters": {
             "type": "object",
@@ -105,7 +103,7 @@ _READ_ONLY_COMMANDS = {
 _SHELL_META_RE = re.compile(r"[;&><`$()\\\n]")
 _FIND_MUTATING_PREFIXES = ("-delete", "-exec", "-execdir", "-ok", "-okdir", "-fls", "-fprint", "-fprintf")
 _SIMPLE_SEARCH_FLAGS = {
-    "-n", "-i", "-r", "-R", "-l", "--line-number", "--ignore-case", "--recursive",
+    "-n", "-i", "-r", "-R", "-l", "-F", "--line-number", "--ignore-case", "--recursive",
     "--fixed-strings", "--files", "--files-with-matches",
 }
 _READ_ONLY_GIT_SUBCOMMANDS = {"branch", "diff", "grep", "log", "ls-files", "rev-parse", "show", "status"}
@@ -171,7 +169,11 @@ def _safe_operand(path_text: str) -> str | None:
     if not path.is_absolute():
         path = config.BASH_ALLOWED_ROOT / path
     path = path.resolve(strict=False)
-    if is_sensitive_path(path) or path_is_or_contains_secret(path):
+    # This is a path-policy preflight, not a content read.  Content DLP runs
+    # on the captured output in _sanitize_read_output; scanning an operand's
+    # bytes here both duplicates that check and can reject source code that
+    # contains harmless variable names/expressions resembling a credential.
+    if is_sensitive_path(path):
         return f"ไม่อนุญาตให้อ่าน path ที่อาจมี credential, token, key หรือ session: {path}"
     return None
 
@@ -320,7 +322,11 @@ def _run_capped(command: str, profile_path: str) -> tuple[str, bool, bool, int |
     or capped) -- there's no exit code to report in that case.
     """
     proc = subprocess.Popen(
-        ["sandbox-exec", "-f", profile_path, "bash", "-c", "set -f; " + command],
+        # Keep pipeline failures visible to the caller and retain normal
+        # read-only filename expansion (e.g. ``ls /project/*.py``).  The
+        # command grammar already rejects shell metacharacters that could
+        # mutate state; the OS profile remains the independent boundary.
+        ["sandbox-exec", "-f", profile_path, "bash", "-c", "set -o pipefail; " + command],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
         cwd=str(config.BASH_ALLOWED_ROOT), start_new_session=True,
     )
@@ -369,20 +375,114 @@ def _run_capped(command: str, profile_path: str) -> tuple[str, bool, bool, int |
 # worse than no hint, so each branch checks an actual signal (returncode,
 # a specific stderr/output marker), never guesses from the command text.
 _SANDBOX_DENY_MARKERS = ("Operation not permitted", "Permission denied", "Read-only file system")
+_NESTED_SANDBOX_MARKER = "sandbox-exec: sandbox_apply: Operation not permitted"
 
 
-def _classify_bash_error(returncode: int | None, output: str) -> str | None:
+def _runtime_path_hint() -> str:
+    return config.runtime_environment_hint()
+
+
+def _missing_command_paths(command: str) -> list[str]:
+    """Return explicit ordinary absolute operands that provably do not exist.
+
+    This is diagnostic-only.  Keep it narrow to common read commands so a
+    regex/pattern that merely begins with '/' is not mislabeled as a path.
+    Sensitive paths are deliberately omitted from diagnostics.
+    """
+    first = command.split("|", 1)[0]
+    # A blocked stderr/stdout redirect should not prevent us from diagnosing
+    # the ordinary path operand that preceded it.
+    first = re.sub(r"(?:\d*)?>\s*\S+", " ", first)
+    try:
+        tokens = shlex.split(first)
+    except ValueError:
+        return []
+    if not tokens:
+        return []
+    executable = os.path.basename(tokens[0])
+    candidates: list[str] = []
+    if executable == "find" and len(tokens) > 1:
+        candidates = [tokens[1]]
+    elif executable in {"ls", "cat", "head", "tail", "wc", "du", "stat", "mdls", "sort"}:
+        candidates = [token for token in tokens[1:] if not token.startswith("-")]
+    elif executable in {"grep", "rg"}:
+        operands = [token for token in tokens[1:] if not token.startswith("-")]
+        candidates = operands[1:] if len(operands) > 1 else []
+    elif executable == "git" and "-C" in tokens:
+        index = tokens.index("-C")
+        if index + 1 < len(tokens):
+            candidates = [tokens[index + 1]]
+    elif executable == "mdfind" and "-onlyin" in tokens:
+        index = tokens.index("-onlyin")
+        if index + 1 < len(tokens):
+            candidates = [tokens[index + 1]]
+
+    missing: list[str] = []
+    for raw in candidates:
+        if not raw.startswith("/") or any(ch in raw for ch in "*?["):
+            continue
+        path = Path(raw)
+        try:
+            if is_sensitive_path(path):
+                continue
+            exists = path.exists()
+        except OSError:
+            continue
+        if not exists and raw not in missing:
+            missing.append(raw)
+        if len(missing) >= 2:
+            break
+    return missing
+
+
+def _classify_bash_error(returncode: int | None, output: str, command: str = "") -> str | None:
+    missing = _missing_command_paths(command) if command else []
+    if missing:
+        return "path ไม่มีอยู่จริง: " + ", ".join(missing)
+    if _NESTED_SANDBOX_MARKER in (output or ""):
+        return (
+            "macOS ปฏิเสธ sandbox-exec ชั้นใน (sandbox_apply: Operation not permitted) — "
+            "command ยังไม่ได้ execute; process นี้อยู่ใต้ parent sandbox ที่ไม่อนุญาต nested sandbox"
+        )
     if returncode == 127:
-        return "command not found — ตรวจตัวสะกด หรือ path นั้นอาจไม่มีอยู่จริง"
+        return "command not found — executable นี้ไม่มีใน runtime/PATH ของ macOS นี้"
     if returncode == 126:
         return "permission denied ตอน execute — ไฟล์นั้นอาจไม่ใช่ executable"
     if returncode not in (None, 0) and any(m in output for m in _SANDBOX_DENY_MARKERS):
         return "sandbox บล็อกการเข้าถึงนี้ — bash ของ LITE อ่านได้เฉพาะไฟล์ที่ไม่ sensitive เท่านั้น"
+    if returncode not in (None, 0):
+        compact = re.sub(r"\s+", " ", (output or "").strip())
+        if compact and compact != "(no output)":
+            return f"exit status {returncode}: {compact[:300]}"
+        return f"exit status {returncode} โดย command ไม่ได้คืน stdout/stderr ที่อธิบายสาเหตุ"
     return None
 
 
+def _blocked_bash_result(reason: str, command: str) -> str:
+    lines = [f"[blocked] bash command ถูกบล็อก: {reason}"]
+    missing = _missing_command_paths(command)
+    if missing:
+        lines.append("[diagnostic] path ที่อ้างไม่มีอยู่จริง: " + ", ".join(missing))
+    if "redirect" in reason:
+        lines.append("[hint] เอา redirect เช่น 2>/dev/null ออก — bash tool จับ stderr ให้เองและต้องเห็น error จริงเพื่อแก้ command")
+    lines.append(f"[hint] {_runtime_path_hint()}")
+    return "\n".join(lines)
+
+
+def _error_bash_result(reason: str) -> str:
+    lines = [f"[error] bash command ล้มเหลว: {reason}"]
+    if "parent sandbox" in reason:
+        lines.append(
+            "[hint] command ยังไม่ได้รันจริง จึงไม่ควรเปลี่ยน path/คำค้นแล้ว retry ต่อ; "
+            "ให้แจ้งผู้ใช้ว่า Agent Lite runtime ต้องเปิดจาก native launcher/Terminal ที่ไม่อยู่ใต้ parent sandbox"
+        )
+    lines.append(f"[hint] {_runtime_path_hint()}")
+    return "\n".join(lines)
+
+
 def _compat_rewrite(command: str) -> str:
-    """Provide file listing when ripgrep is absent from the sandbox PATH."""
+    """Normalize bounded compatibility forms before the strict shell policy."""
+    command = _rewrite_safe_cd_prefix(command)
     try:
         first, *rest = command.split("|", 1)
         tokens = shlex.split(first.strip())
@@ -402,6 +502,111 @@ _DOCUMENT_KIND_PATTERNS = (
     (re.compile(r"\b(?:excel|xlsx)\b", re.IGNORECASE), ".xlsx"),
     (re.compile(r"\b(?:powerpoint|pptx)\b", re.IGNORECASE), ".pptx"),
 )
+
+
+_SAFE_CD_PREFIX_RE = re.compile(
+    r"^\s*cd\s+(?P<target>\"(?:\\.|[^\"\\])*\"|'[^']*'|\S+)\s*&&\s*(?P<rest>.+?)\s*$",
+    re.DOTALL,
+)
+_SAFE_STDERR_REDIRECT_RE = re.compile(r"(?<!\S)2\s*>\s*/dev/null\b")
+_GLOB_CHARS = frozenset("*?[")
+_PATH_ARGUMENT_COMMANDS = frozenset({"cat", "du", "head", "ls", "mdls", "sort", "stat", "tail", "wc"})
+
+
+def _quote_compat_token(token: str, *, preserve_glob: bool = False) -> str:
+    """Quote a rewritten token while leaving a deliberate read glob active."""
+    if preserve_glob and any(char in token for char in _GLOB_CHARS):
+        first_glob = min(token.index(char) for char in _GLOB_CHARS if char in token)
+        return shlex.quote(token[:first_glob]) + token[first_glob:]
+    return shlex.quote(token)
+
+
+def _absolutize_compat_stage(stage: str, base: Path) -> str:
+    """Turn a model's relative read operands into absolute paths.
+
+    The model sometimes emits the familiar shell idiom ``cd ROOT && ls
+    *.py`` even though the Lite grammar deliberately rejects shell chaining.
+    After the safe ``cd`` has been validated, convert only filesystem operands
+    and reconstruct the allow-listed command without reintroducing shell
+    syntax. ``find -name '*.py'`` keeps its pattern quoted; ``ls *.py`` keeps
+    its file glob active.
+    """
+    try:
+        tokens = shlex.split(stage.strip())
+    except ValueError:
+        return stage
+    if not tokens:
+        return stage
+
+    executable = os.path.basename(tokens[0])
+    path_indexes: list[int] = []
+    preserve_glob: set[int] = set()
+    non_flags = [index for index, token in enumerate(tokens[1:], start=1) if not token.startswith("-")]
+
+    if executable in _PATH_ARGUMENT_COMMANDS:
+        path_indexes = [index for index in non_flags if not tokens[index].isdigit()]
+        preserve_glob.update(path_indexes)
+        if executable == "ls" and not path_indexes:
+            tokens.append(str(base))
+            path_indexes = [len(tokens) - 1]
+            preserve_glob.add(path_indexes[0])
+    elif executable == "find":
+        if len(tokens) > 1 and not tokens[1].startswith("-"):
+            path_indexes = [1]
+    elif executable in {"grep", "rg"}:
+        if executable == "rg" and "--files" in tokens:
+            path_indexes = non_flags
+        elif non_flags:
+            path_indexes = non_flags[1:]
+        preserve_glob.update(path_indexes)
+    elif executable == "git" and "-C" in tokens:
+        index = tokens.index("-C") + 1
+        if index < len(tokens):
+            path_indexes = [index]
+    elif executable == "mdfind" and "-onlyin" in tokens:
+        index = tokens.index("-onlyin") + 1
+        if index < len(tokens):
+            path_indexes = [index]
+
+    for index in path_indexes:
+        raw = tokens[index]
+        candidate = Path(raw).expanduser()
+        if not candidate.is_absolute():
+            candidate = base / candidate
+        tokens[index] = str(candidate.resolve(strict=False))
+
+    return " ".join(
+        _quote_compat_token(token, preserve_glob=index in preserve_glob)
+        for index, token in enumerate(tokens)
+    )
+
+
+def _rewrite_safe_cd_prefix(command: str) -> str:
+    """Normalize the model's safe ``cd ROOT && read`` compatibility form.
+
+    Only an existing, non-sensitive directory is accepted. Other chaining or
+    redirects remain untouched and are rejected by the normal shell policy.
+    """
+    match = _SAFE_CD_PREFIX_RE.match(command)
+    if not match:
+        return command
+    try:
+        target = shlex.split(match.group("target"))
+    except ValueError:
+        return command
+    if len(target) != 1:
+        return command
+    base = Path(target[0]).expanduser()
+    if not base.is_absolute():
+        base = config.BASH_ALLOWED_ROOT / base
+    base = base.resolve(strict=False)
+    if not base.is_dir() or is_sensitive_path(base):
+        return command
+
+    rest = _SAFE_STDERR_REDIRECT_RE.sub("", match.group("rest")).strip()
+    if not rest or _SHELL_META_RE.search(rest):
+        return command
+    return " | ".join(_absolutize_compat_stage(stage, base) for stage in rest.split("|"))
 
 
 def _align_find_to_document_kind(command: str, user_query: str) -> str:
@@ -542,6 +747,7 @@ def _align_listing_intent(command: str, user_query: str) -> str:
 
 
 def normalize_command_for_query(command: str, user_query: str) -> str:
+    command = _compat_rewrite(command)
     command = _align_find_to_document_kind(command, user_query)
     command = _align_filename_search(command, user_query)
     command = _align_project_scope(command, user_query)
@@ -554,15 +760,15 @@ def run(args: dict[str, str]) -> str:
     if not command:
         return "[error] command is required"
 
+    command = _compat_rewrite(command)
     deny_reason = _is_denied(command)
     if deny_reason:
-        return f"[blocked] {deny_reason}"
+        return _blocked_bash_result(deny_reason, command)
 
     read_only_reason = _read_only_violation(command)
     if read_only_reason:
-        return f"[blocked] {read_only_reason}"
+        return _blocked_bash_result(read_only_reason, command)
 
-    command = _compat_rewrite(command)
     executable = shlex.split(command.split("|")[0])[0]
 
     profile_path = None
@@ -575,16 +781,20 @@ def run(args: dict[str, str]) -> str:
             profile_path = profile.name
         output, timed_out, capped, returncode = _run_capped(command, profile_path)
         if timed_out:
-            return f"[error] command timed out after {config.BASH_TIMEOUT_SECONDS}s; process group was stopped"
+            return _error_bash_result(
+                f"timeout หลัง {config.BASH_TIMEOUT_SECONDS}s; process group ถูกหยุด"
+            )
         if capped:
-            return f"[error] command output exceeded {_MAX_CAPTURE_BYTES} bytes; process group was stopped"
+            return _error_bash_result(
+                f"output เกิน {_MAX_CAPTURE_BYTES} bytes; process group ถูกหยุด"
+            )
         output = output.strip() or "(no output)"
         output = _sanitize_read_output(os.path.basename(executable), output)
-        hint = _classify_bash_error(returncode, output)
-        if hint:
-            output += f"\n[hint] {hint}"
+        if returncode not in (None, 0):
+            reason = _classify_bash_error(returncode, output, command) or f"exit status {returncode}"
+            return _error_bash_result(reason)
     except Exception as e:
-        return f"[error] bash failed: {e}"
+        return _error_bash_result(f"internal bash runner error: {e}")
     finally:
         if profile_path:
             try:
@@ -596,10 +806,16 @@ def run(args: dict[str, str]) -> str:
         saved_path = save_full_output(output, "bash")
         line_count = len(output.splitlines())
         preview = truncate_output(output, config.TOOL_OUTPUT_TRUNCATE_CHARS)
-        output = (
-            f"[full output: {line_count} lines; saved: {saved_path}; preview below is incomplete]\n"
-            f"{preview}"
-        )
+        if saved_path:
+            output = (
+                f"[full output: {line_count} lines; saved: {saved_path}; preview below is incomplete]\n"
+                f"{preview}"
+            )
+        else:
+            output = (
+                f"[full output: {line_count} lines; could not save full output; preview below is incomplete]\n"
+                f"{preview}"
+            )
     return output
 
 
@@ -617,12 +833,14 @@ def run(args: dict[str, str]) -> str:
 # before/after comparison that justified this split.
 _SYNTAX_MANUAL = (
     "\n\n[bash usage notes]\n"
-    "grep -r -l (list matching FILE NAMES, not every matching line) on an "
-    "ABSOLUTE path -- a relative path like \".\" searches this tool's own "
-    "private sandbox directory, not the user's project, so it will silently "
-    "find nothing even when the command itself is correct. Use the project's "
-    "real full path (given in the system prompt) here, never a placeholder.\n"
-    "✅ rag_search found nothing for a contract phrase -> bash(command=\"grep -r -l 'contract phrase' /real/Documents\")\n"
+    "grep -r -l lists matching FILE NAMES for plain-text paths. For Agent Lite "
+    "Knowledge Base content, use rag_search instead: /sync_kb indexes PDF, Word, "
+    "Excel, text, and image OCR that grep cannot search reliably. If raw changed, "
+    "run /sync_kb first. A relative path like \".\" searches this tool's own "
+    "private sandbox and is not a Knowledge Base search. For a generic content search "
+    "in user files, use local_search first; it scans only the configured Desktop/Documents "
+    "roots. If the user explicitly asks for bash, copy those exact absolute roots and do not "
+    "scan the whole Home directory.\n"
     "Plain grep -r without -l prints every matching line and commonly exceeds "
     "this tool's output cap on a real project (logs, caches) -- always add -l "
     "for a \"which file mentions X\" search; write -r -l as separate flags, not "
@@ -633,8 +851,8 @@ _SYNTAX_MANUAL = (
     "means change approach (simplify the command, use an absolute path), not "
     "retry the same syntax.\n"
     "If a command fails or returns empty, do not rerun the exact same command "
-    "-- narrow the scope or rephrase. If it still doesn't work, tell the user "
-    "plainly it wasn't found; do not loop."
+    "-- change the command materially by narrowing scope or changing the pattern. "
+    "If it still doesn't work, tell the user plainly it wasn't found; do not loop."
 )
 
 # LangChain entry point (2026-07-23, architecture switch to create_react_agent
@@ -656,9 +874,9 @@ def bash(command: str) -> str:
     SELF-CHECK: explicit bash request OR prior insufficient RAG result? If NO,
     call rag_search first. If YES, continue here.
 
-    Use this for counting/listing files matching a condition, whole-machine
-    Spotlight content search, or fallback full-content grep -- not for an
-    exact filename already returned by rag_search.
+    Use this for an explicit read-only command over the configured Knowledge
+    Base/workspace, or for a count/list task that RAG cannot prove -- not for
+    an exact filename already returned by rag_search.
     For a document-type list/count, use find with an absolute root and -name
     extension filter; grep searches file CONTENT and is wrong for this task.
     Never add 2>/dev/null or pipe to head: redirects are blocked and output is
@@ -666,10 +884,10 @@ def bash(command: str) -> str:
     Every filesystem operand must be an absolute path from the system prompt;
     relative paths run inside the private workspect directory, not the project.
 
-    If rag_search finds nothing for a content search, fall back here with
-    grep -r -l on an ABSOLUTE path (never a relative path or placeholder) --
-    detailed syntax/retry notes appear in this tool's own result the first
-    time you call it this turn."""
+    If an explicit bash request needs a content search after local_search/RAG,
+    use grep -r -l on an ABSOLUTE Desktop/Documents path (never a relative path
+    or placeholder) -- detailed syntax/retry notes appear in this tool's own
+    result the first time you call it this turn."""
     from helpers import turn_guard
     command = normalize_command_for_query(command, turn_guard.user_query())
     args = {"command": command}
@@ -688,9 +906,13 @@ def bash(command: str) -> str:
 # beneath Desktop or the project root. Keep the machine's exact, configured
 # document roots at the call site where tool arguments are generated. This is
 # static for the process lifetime, so it does not break prompt-prefix caching.
-_ROOT_GUIDE = ", ".join(f"{path.name}={path}" for path in config.INDEX_ROOTS)
+_ROOT_GUIDE = ", ".join(
+    [*(f"indexed {path.name}={path}" for path in config.INDEX_ROOTS),
+     f"Desktop={config.RUNTIME_DESKTOP}", f"Documents={config.RUNTIME_DOCUMENTS}"]
+)
 bash.description += (
-    f"\nExact indexed document roots: {_ROOT_GUIDE}. "
+    f"\nExact configured read roots: {_ROOT_GUIDE}. "
     "Copy these paths exactly; never move Documents/Downloads under Desktop "
-    "or under the project root."
+    "or under the project root. Use local_search first for generic user-file content. "
+    f"{config.runtime_environment_hint()}"
 )

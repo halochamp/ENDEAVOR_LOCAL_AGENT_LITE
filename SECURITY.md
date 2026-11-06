@@ -18,5 +18,7 @@ and coordinate disclosure after a fix is available.
 
 The Web UI is intentionally bound to `127.0.0.1`; do not expose it to a LAN
 or the public internet. The agent blocks common sensitive paths and confines
-file creation to `workspect/`, but these are defense-in-depth controls—not a
-guarantee that a local agent can safely process every untrusted file.
+user-facing file creation to `workspect/`. Runtime indexes/logs live in the
+per-user Application Support directory, and the bundled MCP-RagDoc receives
+write access only to that private runtime state—not to source documents. These
+are defense-in-depth controls, not a guarantee that every untrusted file is safe.

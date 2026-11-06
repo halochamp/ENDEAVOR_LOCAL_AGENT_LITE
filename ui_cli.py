@@ -1,6 +1,3 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
 """ui_cli.py — terminal chat loop, using the ui.py visual layer ported from
 ENDEAVOR_LOCAL_AGENT_MAX_VLM/ui_cli.py. CLI remains the UI *choice* from
 PLAN.md §2 — this only changes how the terminal looks, not the agent logic.
@@ -15,7 +12,7 @@ import sys
 
 import agent
 import config
-import indexer
+import rag_mcp_service
 import ui
 from tools import TOOLS
 
@@ -34,26 +31,45 @@ def main() -> None:
         if user_input in ("/exit", "/quit"):
             print("ลาก่อนครับ")
             return
-        if user_input.lower() == "/index":
+        if user_input.lower() in {"/index", "/sync_kb"}:
             ui.print_user_prompt(user_input)
-            with ui.Spinner("กำลังสร้าง RAG index…") as spinner:
-                spinner.update_sub("กำลังเตรียมรายการไฟล์…")
+            sync_command = user_input.lower() == "/sync_kb"
+            with ui.Spinner("กำลัง sync Knowledge Base…" if sync_command else "กำลังสร้าง RAG index…") as spinner:
+                spinner.update_sub(
+                    "กำลังอ่านเอกสารใน rag_document/ และเตรียม SQLite…"
+                    if sync_command else "กำลังเตรียมรายการไฟล์…"
+                )
 
                 def on_index_progress(event: str, path, stats: dict[str, int]) -> None:
-                    if event in {"file", "result"}:
+                    if sync_command:
+                        spinner.update_sub(ui.sync_kb_progress_text(event, path, stats))
+                    elif event in {"file", "result"}:
                         spinner.update_sub(ui.index_progress_text(path, stats))
                     elif event == "root":
                         spinner.update_sub(f"กำลังสแกน {path}…")
 
                 try:
-                    stats = indexer.build_index(on_progress=on_index_progress)
+                    stats = (
+                        rag_mcp_service.sync_kb(on_progress=on_index_progress)
+                        if sync_command
+                        else rag_mcp_service.index_legacy(on_progress=on_index_progress)
+                    )
                 except KeyboardInterrupt:
-                    spinner.live_print(lambda: print("\n[stopped] ยกเลิกการสร้าง index แล้ว", file=sys.stderr))
+                    spinner.live_print(lambda: print(
+                        "\n[stopped] ยกเลิกการ sync Knowledge Base แล้ว" if sync_command
+                        else "\n[stopped] ยกเลิกการสร้าง index แล้ว", file=sys.stderr,
+                    ))
                     continue
                 except Exception as e:
-                    spinner.live_print(lambda: print(f"\n[error] สร้าง index ไม่สำเร็จ: {e}", file=sys.stderr))
+                    spinner.live_print(lambda: print(
+                        f"\n[error] {'sync Knowledge Base' if sync_command else 'สร้าง index'} ไม่สำเร็จ: {e}",
+                        file=sys.stderr,
+                    ))
                     continue
-            ui.print_index_summary(stats)
+            if sync_command:
+                ui.print_sync_kb_summary(stats)
+            else:
+                ui.print_index_summary(stats)
             ui.print_divider()
             continue
 

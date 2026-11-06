@@ -1,6 +1,3 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
 """turn_guard.py — per-turn guardrail state shared by the 6 tool wrappers.
 
 Architecture switch (2026-07-23, config.py's module docstring): create_react_agent
@@ -56,16 +53,25 @@ def check(name: str, args: dict[str, str]) -> str | None:
     # holding the lock, before the tool starts, so parallel calls cannot all
     # pass a stale count and exceed the per-turn cap.
     with _state_lock:
-        if _tool_counts.get(name, 0) >= config.MAX_CALLS_PER_TOOL:
+        configured_limit = config.MAX_CALLS_PER_TOOL
+        if name == "web_search":
+            configured_limit = min(
+                configured_limit,
+                getattr(config, "MAX_WEB_CALLS_PER_TURN", configured_limit),
+            )
+        if _tool_counts.get(name, 0) >= configured_limit:
             return (
-                f"[error] เรียก {name} ครบโควตาแล้ว ({config.MAX_CALLS_PER_TOOL} ครั้งต่อ turn) "
+                f"[error] เรียก {name} ครบโควตาแล้ว ({configured_limit} ครั้งต่อ turn) "
                 f"ห้ามเรียกซ้ำอีก ใช้ข้อมูลที่มีอยู่แล้วตอบสรุปให้ผู้ใช้เลย"
             )
         guard_msg = _guard.check(name, args)
         if guard_msg == "__ABORT__":
             return "[error] ลองหลายวิธีกับ tool นี้แล้วยังไม่สำเร็จ ห้ามเรียกซ้ำอีก ให้สรุปบอกผู้ใช้ตรงๆ ว่าทำไม่สำเร็จ"
         if guard_msg:
-            return f"[error] {guard_msg}"
+            message = f"[error] {guard_msg}"
+            if name == "bash":
+                message += f"\n[hint] {config.runtime_environment_hint()}"
+            return message
         _tool_counts[name] = _tool_counts.get(name, 0) + 1
         key = _key(name, args)
         _reservations[key] = _reservations.get(key, 0) + 1

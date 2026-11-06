@@ -1,6 +1,3 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
 """Safety contract for clicking local paths rendered by the browser UI."""
 from __future__ import annotations
 

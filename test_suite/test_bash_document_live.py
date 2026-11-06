@@ -1,6 +1,3 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
 """Live trajectory eval for document discovery and bash argument quality.
 
 The turn-1 routing probe proves which tool is selected first.  This script
@@ -112,14 +109,14 @@ CASES = [
     Case(
         "rag-first-pdf-count",
         "มีเอกสาร PDF กี่ไฟล์ใน Documents",
-        ("rag_search", "bash"),
+        ("mcp_call_tool", "bash"),
         lambda command: _is_find(command, DOCUMENTS, ".pdf", count=True),
         "default count uses RAG first, then a complete bash count",
     ),
     Case(
         "rag-first-whole-machine-fallback",
         "ค้นหาทั้งเครื่องที่มีคำว่า เอกสารทดสอบซอร์กซิฟ-ไม่มีจริง-92841",
-        ("rag_search", "bash"),
+        ("mcp_call_tool", "bash"),
         _is_mdfind,
         "missing whole-machine content falls back from RAG to mdfind",
     ),
@@ -166,16 +163,18 @@ def _run(case: Case) -> tuple[bool, str]:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repeat", type=int, default=1)
+    parser.add_argument("--case", choices=[case.name for case in CASES])
     args = parser.parse_args()
 
+    active_cases = [case for case in CASES if args.case in (None, case.name)]
     passed = 0
-    total = len(CASES) * args.repeat
+    total = len(active_cases) * args.repeat
     for round_number in range(1, args.repeat + 1):
-        for case in CASES:
+        for case in active_cases:
             ok, detail = _run(case)
             passed += int(ok)
-            print(f"[{'PASS' if ok else 'FAIL'}] round={round_number} {case.name}: {detail}")
-    print(f"\nTOTAL: {passed}/{total} passed")
+            print(f"[{'PASS' if ok else 'FAIL'}] round={round_number} {case.name}: {detail}", flush=True)
+    print(f"\nTOTAL: {passed}/{total} passed", flush=True)
     raise SystemExit(0 if passed == total else 1)
 
 

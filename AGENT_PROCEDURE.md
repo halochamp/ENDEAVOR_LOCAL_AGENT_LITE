@@ -34,6 +34,7 @@ Preserve:
 - lazy loading of heavy dependencies;
 - disk-backed/index-backed behavior where designed;
 - bounded context and output handling.
+- document RAG is separated behind the bundled standalone `MCP-RagDoc/` boundary;
 
 Do not add a second cloud LLM or silently route private local content to a cloud model.
 

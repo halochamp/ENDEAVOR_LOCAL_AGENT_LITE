@@ -1,6 +1,3 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
 """tools/write_file.py — trimmed from ENDEAVOR_LOCAL_AGENT_MAX_VLM/tools/write_file.py.
 
 Dropped: langchain @tool decorator, chunked progress-reporting write (256KB

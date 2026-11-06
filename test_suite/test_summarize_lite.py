@@ -1,6 +1,3 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
 """No model, no network — pure logic tests for helpers/summarize_lite.py."""
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -44,3 +41,19 @@ def test_extractive_summary_falls_back_when_no_term_match():
 if __name__ == "__main__":
     import pytest
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+def test_query_filtered_summary_keeps_only_positive_query_passages():
+    from helpers.summarize_lite import query_filtered_summary
+
+    text = "Navigation and contact details\n\nAlpha revenue reached 100 million\n\nFooter links"
+    out = query_filtered_summary(text, "alpha revenue", 300)
+    assert "Alpha revenue reached 100 million" in out
+    assert "Navigation" not in out
+    assert "Footer" not in out
+
+
+def test_query_filtered_summary_returns_empty_without_match():
+    from helpers.summarize_lite import query_filtered_summary
+
+    assert query_filtered_summary("Navigation only", "alpha revenue", 300) == ""

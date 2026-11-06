@@ -1,6 +1,3 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
 """test_routing_probe.py — Phase 7.1 (PLAN.md §Phase 7): turn-1 routing probe.
 
 Needs the real model loaded — not part of the LLM-free unit suite (run
@@ -47,9 +44,9 @@ def _get_llm_with_tools():
     return _llm_with_tools
 
 CASES: list[tuple[str, str, str | None]] = [
-    ("find_by_name_1", "PLAN.md อยู่ที่ไหนในโปรเจกต์ ENDEAVOR_AGENT_LITE (บอก path เต็ม) แล้วสรุปว่าไฟล์นี้พูดถึงอะไร", "rag_search"),
-    ("find_by_name_2", "หาไฟล์ config.py อยู่ที่ไหน", "rag_search"),
-    ("find_by_content", "มีไฟล์ไหนในโปรเจกต์นี้พูดถึง trigram tokenizer บ้าง", "rag_search"),
+    ("find_by_name_1", "PLAN.md อยู่ที่ไหนในโปรเจกต์ ENDEAVOR_AGENT_LITE (บอก path เต็ม) แล้วสรุปว่าไฟล์นี้พูดถึงอะไร", "mcp_call_tool"),
+    ("find_by_name_2", "หาไฟล์ config.py อยู่ที่ไหน", "mcp_call_tool"),
+    ("find_by_content", "มีไฟล์ไหนในโปรเจกต์นี้พูดถึง trigram tokenizer บ้าง", "mcp_call_tool"),
     ("web_search", "ช่วยค้นหาว่า Python 3.13 มีฟีเจอร์ใหม่อะไรบ้าง พร้อมแนบลิงก์ที่มา", "web_search"),
     ("chitchat", "สวัสดีครับ วันนี้เป็นไงบ้าง", None),
     ("read_image", "อ่านรูปนี้ให้หน่อย /tmp/agent_live_test_image.png มีข้อความอะไรบ้าง", "read_image"),

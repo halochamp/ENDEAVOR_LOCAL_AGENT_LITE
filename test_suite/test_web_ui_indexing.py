@@ -1,6 +1,3 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
 """PLAN.md §9.2 gate: /index runs as its own short-lived subprocess (so a
 stalled per-file read never accumulates state in the always-on UI process),
 and /index + agent chat turns from different browser tabs serialize through
@@ -78,7 +75,7 @@ def test_index_and_chat_serialize_through_the_shared_heavy_work_lock(monkeypatch
 
     def fake_run_turn(
         user_input, messages, on_step=None, attachment_image=None,
-        cancel_event=None, stream_tokens=False,
+        cancel_event=None, stream_tokens=False, effort=None,
     ):
         assert stream_tokens is True
         turn_started_at.append(time.time())
@@ -271,6 +268,23 @@ def test_index_subprocess_crash_is_reported_as_error_not_cancelled(monkeypatch, 
     assert stats is None
     assert crashed is True
     assert "boom" in detail or "RuntimeError" in detail
+
+
+def test_index_subprocess_timeout_is_reported_as_failure_and_reaped(monkeypatch, tmp_path):
+    hanging_worker = tmp_path / "timeout.py"
+    hanging_worker.write_text("import time\ntime.sleep(300)\n", encoding="utf-8")
+    monkeypatch.setattr(web_ui, "_INDEX_WORKER", hanging_worker)
+    monkeypatch.setattr(web_ui, "_INDEX_MAX_RUNTIME_SECONDS", 0.5)
+    monkeypatch.setattr(web_ui, "_active_index_process", None)
+
+    stats, crashed, detail = asyncio.run(
+        web_ui._run_index_subprocess(_FakeWebSocket("timeout", []))
+    )
+
+    assert stats is None
+    assert crashed is True
+    assert "exceeded" in detail
+    assert web_ui._active_index_process is None
 
 
 def test_indexer_worker_subprocess_streams_jsonl_and_exits(tmp_path):

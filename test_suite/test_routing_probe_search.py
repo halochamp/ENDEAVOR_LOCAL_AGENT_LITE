@@ -1,8 +1,5 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
 """test_routing_probe_search.py — turn-1 tool-selection walking test for
-file-search (rag_search/bash/read_file) and internet-search (web_search)
+file-search (lite-rag MCP/bash/read_file) and internet-search (web_search)
 routing, per agent_training_guide/sum_agent_training_guide.md's "Routing
 probe pattern" (§ Validating a Prompt Change with an Executable Eval).
 
@@ -18,10 +15,10 @@ Cases are grouped by the exact distinctions prompts.py's SYSTEM_PROMPT
 rules 2, 3, and 9 draw, since those are the boundaries most likely to
 blur for a 2B model:
   - default RAG-first vs explicit-user-requested bash-first
-  - rag_search then bash (list/count/full-content fallback trajectory)
-  - rag_search+read_file vs bash (combined "find X and summarize" query)
+  - lite-rag.rag_search via MCP then bash (list/count/full-content fallback trajectory)
+  - lite-rag.rag_search via MCP + read_file vs bash (combined "find X and summarize" query)
   - web_search vs no-tool (real-time info vs general/opinion knowledge)
-  - web_search vs rag_search (must not divert a local file request to the
+  - web_search vs lite-rag MCP (must not divert a local file request to the
     internet just because no RAG index exists yet)
   - no-tool distractors (chit-chat) that must not trigger ANY tool
 
@@ -54,41 +51,41 @@ import prompts
 # expected_tool=None means "no tool call at all" is correct.
 CASES: list[tuple[str, str, str, str | None, str]] = [
     # Document-name lookup.
-    ("doc-name-1", "document/name", "ใบเสร็จเดือนกรกฎาคม.pdf อยู่ที่ไหน", "rag_search",
+    ("doc-name-1", "document/name", "ใบเสร็จเดือนกรกฎาคม.pdf อยู่ที่ไหน", "mcp_call_tool",
      "exact PDF name"),
-    ("doc-name-2", "document/name", "หาไฟล์สัญญาเช่า.docx ให้หน่อย", "rag_search",
+    ("doc-name-2", "document/name", "หาไฟล์สัญญาเช่า.docx ให้หน่อย", "mcp_call_tool",
      "casual exact Word filename"),
-    ("doc-name-3", "document/name", "มีรายงานประจำปี.xlsx ในเครื่องไหม", "rag_search",
+    ("doc-name-3", "document/name", "มีรายงานประจำปี.xlsx ในเครื่องไหม", "mcp_call_tool",
      "yes/no exact spreadsheet lookup"),
 
     # Combined locate + read/summarize still starts at RAG.
     ("doc-combo-1", "document/combo",
      "สัญญาเช่า.docx อยู่ที่ไหน แล้วสรุปเงื่อนไขสำคัญให้หน่อย",
-     "rag_search", "locate then read document"),
+     "mcp_call_tool", "locate then read document"),
     ("doc-combo-2", "document/combo",
      "เอกสารไหนพูดถึงค่าปรับยกเลิกสัญญา แล้วช่วยสรุปให้ด้วย",
-     "rag_search", "content lookup then explain"),
+     "mcp_call_tool", "content lookup then explain"),
 
     # Content lookup is RAG-first; bash is a later fallback.
-    ("doc-content-1", "document/content", "มีเอกสารไหนพูดถึงค่าปรับยกเลิกสัญญาบ้าง", "rag_search",
+    ("doc-content-1", "document/content", "มีเอกสารไหนพูดถึงค่าปรับยกเลิกสัญญาบ้าง", "mcp_call_tool",
      "document content phrase"),
-    ("doc-content-2", "document/content", "หาเอกสารที่มีคำว่า ยอดชำระ 4,500 บาท", "rag_search",
+    ("doc-content-2", "document/content", "หาเอกสารที่มีคำว่า ยอดชำระ 4,500 บาท", "mcp_call_tool",
      "invoice-like content phrase"),
-    ("doc-content-3", "document/content", "เอกสารไหนกล่าวถึงวันครบกำหนดชำระเงิน", "rag_search",
+    ("doc-content-3", "document/content", "เอกสารไหนกล่าวถึงวันครบกำหนดชำระเงิน", "mcp_call_tool",
      "semantic-looking but lexical document request"),
-    ("doc-machine-1", "document/machine-content", "ค้นหาทั้งเครื่องที่มีคำว่า เลขที่กรมธรรม์", "rag_search",
+    ("doc-machine-1", "document/machine-content", "ค้นหาทั้งเครื่องที่มีคำว่า เลขที่กรมธรรม์", "mcp_call_tool",
      "whole-machine scope still begins with RAG"),
-    ("doc-machine-2", "document/machine-content", "ค้นทุกไฟล์ใน Mac ที่พูดถึงผู้รับผลประโยชน์", "rag_search",
+    ("doc-machine-2", "document/machine-content", "ค้นทุกไฟล์ใน Mac ที่พูดถึงผู้รับผลประโยชน์", "mcp_call_tool",
      "alternate whole-machine phrasing"),
 
     # List/count needs RAG first, then bash for completeness.
-    ("doc-count-1", "document/count", "มีเอกสาร PDF กี่ไฟล์ใน Documents", "rag_search",
+    ("doc-count-1", "document/count", "มีเอกสาร PDF กี่ไฟล์ใน Documents", "mcp_call_tool",
      "RAG first; bash later provides complete count"),
-    ("doc-count-2", "document/count", "นับไฟล์ Excel ทั้งหมดใน Documents ให้หน่อย", "rag_search",
+    ("doc-count-2", "document/count", "นับไฟล์ Excel ทั้งหมดใน Documents ให้หน่อย", "mcp_call_tool",
      "alternate count phrasing"),
-    ("doc-list-1", "document/list", "list เอกสาร Word ทั้งหมดใน Documents", "rag_search",
+    ("doc-list-1", "document/list", "list เอกสาร Word ทั้งหมดใน Documents", "mcp_call_tool",
      "RAG first; bash later provides complete list"),
-    ("doc-list-2", "document/list", "ขอดูรายชื่อไฟล์ PowerPoint ใน Downloads ทั้งหมด", "rag_search",
+    ("doc-list-2", "document/list", "ขอดูรายชื่อไฟล์ PowerPoint ใน Downloads ทั้งหมด", "mcp_call_tool",
      "natural-language list request"),
 
     # Explicit bash instruction is the only bash-first route.
@@ -117,8 +114,8 @@ CASES: list[tuple[str, str, str, str | None, str]] = [
      "today's news"),
 
     # General knowledge/opinion requires no tool.
-    ("web-noop-1", "web/no-tool", "แนะนำร้านกาแฟที่ชอบหน่อย", None,
-     "opinion/general"),
+    ("web-noop-1", "web/no-tool", "คิดว่าจัดเอกสารตามปีอ่านง่ายไหม", None,
+     "stable opinion with no external facts needed"),
     ("web-noop-2", "web/no-tool", "คิดว่า PDF กับ Word แบบไหนเหมาะส่งรายงานมากกว่า", None,
      "general comparison"),
     ("web-noop-3", "web/no-tool", "อธิบายดอกเบี้ยทบต้นคืออะไร", None,
@@ -127,7 +124,7 @@ CASES: list[tuple[str, str, str, str | None, str]] = [
     # Local documents must never divert to the web.
     ("web-not-diverted-1", "web/not-diverted",
      "หาเอกสารในเครื่องที่เกี่ยวกับเงื่อนไขต่ออายุประกันให้หน่อย",
-     "rag_search", "local content lookup, not internet research"),
+     "mcp_call_tool", "local content lookup, not internet research"),
 
     ("chitchat-1", "no-tool", "สวัสดีครับ วันนี้เป็นไงบ้าง", None, "greeting"),
     ("chitchat-2", "no-tool", "ขอบคุณมากครับ ช่วยได้เยอะเลย", None, "thanks"),
@@ -144,7 +141,14 @@ def probe(llm, query: str) -> tuple[str | None, list[str]]:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repeat", type=int, default=1, help="repeat each case N times, report majority vote")
+    parser.add_argument(
+        "--category",
+        action="append",
+        choices=sorted({case[1] for case in CASES}),
+        help="run only this category (repeatable); keeps long stress runs below an external command timeout",
+    )
     args = parser.parse_args()
+    active_cases = [case for case in CASES if not args.category or case[1] in args.category]
 
     # Runtime policy: every request, including tool routing, uses the bounded
     # thinking budget configured in config.py.  Do not make this probe silently
@@ -152,7 +156,7 @@ def main() -> None:
     llm = build_llm(temperature=0).bind_tools(ALL_TOOLS)
 
     results: list[tuple[str, str, bool, str, list[str]]] = []
-    for name, category, query, expected, note in CASES:
+    for name, category, query, expected, note in active_cases:
         votes: list[str | None] = []
         all_names: list[list[str]] = []
         for _ in range(args.repeat):
@@ -163,11 +167,11 @@ def main() -> None:
         ok = majority == expected
         results.append((name, category, ok, f"expected={expected} got={majority} votes={votes}", note))
         print(f"[{'PASS' if ok else 'FAIL'}] {name:22s} ({category:16s}) "
-              f"expected={str(expected):12s} got={str(majority):12s} votes={votes}")
+              f"expected={str(expected):12s} got={str(majority):12s} votes={votes}", flush=True)
         if not ok:
             print(f"           note: {note}")
 
-    print(f"\n{'='*78}\nSUMMARY BY CATEGORY\n{'='*78}")
+    print(f"\n{'='*78}\nSUMMARY BY CATEGORY\n{'='*78}", flush=True)
     by_cat: dict[str, list[bool]] = defaultdict(list)
     for _, category, ok, _, _ in results:
         by_cat[category].append(ok)
@@ -175,7 +179,7 @@ def main() -> None:
         print(f"  {category:18s} {sum(oks)}/{len(oks)}")
 
     total_ok = sum(1 for _, _, ok, _, _ in results if ok)
-    print(f"\nTOTAL: {total_ok}/{len(results)} passed")
+    print(f"\nTOTAL: {total_ok}/{len(results)} passed", flush=True)
     if total_ok < len(results):
         print("\nFAILED CASES:")
         for name, category, ok, detail, note in results:

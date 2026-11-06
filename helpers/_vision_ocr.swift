@@ -21,17 +21,30 @@ guard args.count > 1,
     exit(1)
 }
 
-// Output: one observation per line as `x\ty\tw\th\ttext` (boundingBox is
-// normalized [0,1], origin BOTTOM-LEFT). The Python side strips coords for
-// plain-text callers and uses them to reconstruct table layout.
+// Output: one observation per line as
+// x\ty\tw\th\tconfidence\tcandidate1\tcandidate2\tcandidate3
+// (boundingBox is normalized [0,1], origin BOTTOM-LEFT). Candidate text is
+// flattened to one TSV-safe line; Python keeps backward compatibility with the
+// older 5-field helper protocol.
+func tsvSafe(_ text: String) -> String {
+    return text
+        .replacingOccurrences(of: "\t", with: " ")
+        .replacingOccurrences(of: "\r", with: " ")
+        .replacingOccurrences(of: "\n", with: " ")
+}
+
 let req = VNRecognizeTextRequest { (request, _) in
     guard let obs = request.results as? [VNRecognizedTextObservation] else { return }
     var out: [String] = []
     for o in obs {
-        guard let s = o.topCandidates(1).first?.string else { continue }
+        let candidates = o.topCandidates(3)
+        guard let best = candidates.first else { continue }
         let b = o.boundingBox
-        out.append(String(format: "%.5f\t%.5f\t%.5f\t%.5f\t%@",
-                          b.origin.x, b.origin.y, b.size.width, b.size.height, s))
+        let texts = candidates.map { tsvSafe($0.string) }
+        let padded = texts + Array(repeating: "", count: max(0, 3 - texts.count))
+        out.append(String(format: "%.5f\t%.5f\t%.5f\t%.5f\t%.6f\t%@\t%@\t%@",
+                          b.origin.x, b.origin.y, b.size.width, b.size.height,
+                          best.confidence, padded[0], padded[1], padded[2]))
     }
     print(out.joined(separator: "\n"))
 }

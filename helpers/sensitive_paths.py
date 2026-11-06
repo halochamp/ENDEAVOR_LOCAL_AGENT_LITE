@@ -1,6 +1,3 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
 """One deny policy for local secrets across direct read, bash, and FTS index."""
 from __future__ import annotations
 
@@ -27,7 +24,17 @@ _SECRET_CONTENT_PATTERNS = (
     re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"),
     re.compile(r"\bxox(?:b|p|a|r|s)-[A-Za-z0-9-]{20,}\b"),
     re.compile(r"\bAIza[A-Za-z0-9_-]{20,}\b"),
-    re.compile(r"\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret|password|token|secret)\b\s*[:=]\s*['\"]?[^\s'\"]{12,}", re.I),
+    # Assignment-style credentials need a literal-looking value.  The old
+    # optional-quote expression treated ordinary source expressions such as
+    # ``token = search_scope.set_request_query(user_input)`` as secrets, which
+    # blocked reading agent.py itself.  Keep bare token assignments covered,
+    # but require a contiguous value that cannot be a dotted/call expression;
+    # quoted values remain covered even when they contain punctuation.
+    re.compile(
+        r"\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret|password|token|secret)\b"
+        r"\s*[:=]\s*(?:['\"][^'\"]{12,}['\"]|[A-Za-z0-9+/=-]{12,}(?![A-Za-z0-9_./()]))",
+        re.I,
+    ),
     re.compile(r"\beyJ[a-zA-Z0-9_-]{20,}\.[a-zA-Z0-9_-]{20,}\.[a-zA-Z0-9_-]{10,}\b"),
 )
 

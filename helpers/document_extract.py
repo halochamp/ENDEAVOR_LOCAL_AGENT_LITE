@@ -1,6 +1,3 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
 """Lean, read-only text extraction for PDF and Office documents.
 
 extract_text() stays the full-body, byte-identical entry point existing
@@ -13,6 +10,7 @@ its whole extracted body held in memory at once (PLAN.md §9.1).
 from __future__ import annotations
 
 import shutil
+import posixpath
 import subprocess
 import tempfile
 import xml.etree.ElementTree as ET
@@ -59,6 +57,251 @@ def pdf_page_text(path: Path, index: int) -> str:
     import fitz
     with fitz.open(path) as pdf:
         return pdf[index].get_text("text").strip()
+
+
+def document_page_count(path: Path) -> int | None:
+    """Return the document's stored page count when the format provides one.
+
+    Word stores the last pagination count in ``docProps/app.xml``.  It is the
+    only page-count signal available without launching a GUI renderer; the
+    page-break markers in ``word/document.xml`` then locate each extracted
+    paragraph within that saved pagination.
+    """
+    suffix = path.suffix.lower()
+    if suffix == ".pdf":
+        try:
+            return pdf_page_count(path)
+        except (OSError, RuntimeError, ValueError):
+            return None
+    if suffix not in {".docx", ".docm"}:
+        return None
+    try:
+        with zipfile.ZipFile(path) as package:
+            raw = package.read("docProps/app.xml")
+        root = ET.fromstring(raw)
+    except (OSError, KeyError, zipfile.BadZipFile, ET.ParseError):
+        return None
+    for element in root.iter():
+        if element.tag.rsplit("}", 1)[-1] != "Pages":
+            continue
+        try:
+            value = int((element.text or "").strip())
+        except ValueError:
+            return None
+        return value if value > 0 else None
+    return None
+
+
+def iter_document_units_with_locations(path: Path) -> Iterator[tuple[str, str]]:
+    """Yield ``(location, text)`` pairs with page-aware DOCX locations.
+
+    The historical ``iter_document_units`` API remains string-only for
+    callers such as ``read_file``.  The KB/index search path uses this richer
+    companion so a Word paragraph is reported as ``page 18/79`` instead of an
+    opaque extraction-unit range.  Consecutive explicit and
+    ``lastRenderedPageBreak`` markers are treated as one break because Word
+    commonly writes both for the same boundary.
+    """
+    suffix = path.suffix.lower()
+    if suffix in {".docx", ".docm"}:
+        total = document_page_count(path)
+        for page, text in _iter_docx_page_units(path):
+            total_text = f"/{total}" if total else ""
+            yield f"page {page}{total_text}", text
+        return
+
+    total = document_page_count(path)
+    for index, unit in enumerate(iter_document_units(path), 1):
+        if suffix == ".pdf":
+            location = f"page {index}/{total}" if total else f"page {index}"
+        else:
+            location = f"unit {index}"
+        yield location, unit
+
+
+def _iter_docx_page_units(path: Path) -> Iterator[tuple[int, str]]:
+    """Stream DOCX paragraphs while applying Word's saved page markers."""
+    try:
+        package = zipfile.ZipFile(path)
+    except (OSError, zipfile.BadZipFile) as exc:
+        raise RuntimeError(f"เปิด Word package ไม่สำเร็จ: {exc}") from exc
+    with package:
+        try:
+            stream = package.open("word/document.xml")
+        except (KeyError, OSError) as exc:
+            raise RuntimeError(f"อ่าน Word document.xml ไม่สำเร็จ: {exc}") from exc
+        page = 1
+        with stream:
+            try:
+                pending_explicit_page_break = False
+                for event, element in ET.iterparse(stream, events=("end",)):
+                    if element.tag.rsplit("}", 1)[-1] != "p":
+                        continue
+                    page, segments = _docx_paragraph_page_segments(
+                        element,
+                        page,
+                        skip_leading_rendered_break=(
+                            pending_explicit_page_break
+                            and _docx_starts_with_rendered_break(element)
+                        ),
+                    )
+                    for segment_page, text in segments:
+                        if text.strip():
+                            yield segment_page, text.strip()
+                    pending_explicit_page_break = _docx_ends_with_explicit_page_break(element)
+                    if _docx_has_next_page_section(element):
+                        page += 1
+                    # Release the paragraph and its runs after extraction;
+                    # this keeps large Word packages bounded while retaining
+                    # the exact paragraph order used by the page map.
+                    element.clear()
+            except ET.ParseError as exc:
+                raise RuntimeError(f"Word document.xml ไม่ถูกต้อง: {exc}") from exc
+
+
+def _docx_paragraph_page_segments(
+    paragraph: ET.Element,
+    page: int,
+    *,
+    skip_leading_rendered_break: bool = False,
+) -> tuple[int, list[tuple[int, str]]]:
+    segments: list[tuple[int, str]] = []
+    pieces: list[str] = []
+    pending_page_break = False
+    current_page = page
+    page_type = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}type"
+    ignored_leading_rendered_break = False
+    run_content = _docx_run_content_map(paragraph)
+
+    for element in paragraph.iter():
+        local_name = element.tag.rsplit("}", 1)[-1]
+        in_run = run_content.get(id(element), False)
+        is_page_break = (
+            in_run
+            and (
+                local_name == "lastRenderedPageBreak"
+                or (local_name == "br" and element.attrib.get(page_type) == "page")
+            )
+        )
+        if is_page_break:
+            if (
+                skip_leading_rendered_break
+                and local_name == "lastRenderedPageBreak"
+                and not pieces
+                and not ignored_leading_rendered_break
+            ):
+                # Word often writes a manual page break at the end of one
+                # paragraph and repeats the same boundary as a rendered break
+                # at the start of the next paragraph.  Count that boundary
+                # once, even when the two markers are in separate paragraphs.
+                ignored_leading_rendered_break = True
+                pending_page_break = True
+                continue
+            if not pending_page_break:
+                text = "".join(pieces).strip()
+                if text:
+                    segments.append((current_page, text))
+                pieces = []
+                current_page += 1
+            pending_page_break = True
+            continue
+        if in_run and local_name == "t":
+            pieces.append(element.text or "")
+            pending_page_break = False
+        elif in_run and local_name == "tab":
+            pieces.append("\t")
+            pending_page_break = False
+        elif in_run and local_name == "br":
+            pieces.append("\n")
+            pending_page_break = False
+
+    text = "".join(pieces).strip()
+    if text:
+        segments.append((current_page, text))
+    return current_page, segments
+
+
+def _docx_run_content_map(paragraph: ET.Element) -> dict[int, bool]:
+    """Mark descendants that are actual run content, not paragraph styling."""
+    parents: dict[int, ET.Element] = {}
+    for parent in paragraph.iter():
+        for child in parent:
+            parents[id(child)] = parent
+
+    result: dict[int, bool] = {}
+    for element in paragraph.iter():
+        cursor = element
+        in_run = False
+        while cursor is not paragraph:
+            if cursor.tag.rsplit("}", 1)[-1] == "r":
+                in_run = True
+                break
+            cursor = parents.get(id(cursor))
+            if cursor is None:
+                break
+        result[id(element)] = in_run
+    return result
+
+
+def _docx_starts_with_rendered_break(paragraph: ET.Element) -> bool:
+    """Return whether the first content marker is a rendered page break."""
+    run_content = _docx_run_content_map(paragraph)
+    for element in paragraph.iter():
+        local_name = element.tag.rsplit("}", 1)[-1]
+        if not run_content.get(id(element), False):
+            continue
+        if local_name == "lastRenderedPageBreak":
+            return True
+        if local_name == "br":
+            return False
+        if local_name == "t" and (element.text or ""):
+            return False
+        # ``w:tab`` is also used in paragraph-formatting properties as a tab
+        # stop.  It is content only when it appears after a run; ignoring it
+        # here lets a rendered break immediately after ``w:pPr`` be detected.
+    return False
+
+
+def _docx_ends_with_explicit_page_break(paragraph: ET.Element) -> bool:
+    """Return whether the paragraph ends with a manual page-break marker."""
+    page_type = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}type"
+    run_content = _docx_run_content_map(paragraph)
+    last_marker: str | None = None
+    has_content_after_marker = False
+    for element in paragraph.iter():
+        local_name = element.tag.rsplit("}", 1)[-1]
+        if not run_content.get(id(element), False):
+            continue
+        if local_name == "lastRenderedPageBreak":
+            last_marker = "rendered"
+            has_content_after_marker = False
+        elif local_name == "br" and element.attrib.get(page_type) == "page":
+            last_marker = "explicit"
+            has_content_after_marker = False
+        elif local_name == "t" and (element.text or ""):
+            has_content_after_marker = True
+        elif local_name == "tab":
+            has_content_after_marker = True
+    return last_marker == "explicit" and not has_content_after_marker
+
+
+def _docx_has_next_page_section(paragraph: ET.Element) -> bool:
+    """Return whether a paragraph ends a section that starts on a new page."""
+    for element in paragraph.iter():
+        if element.tag.rsplit("}", 1)[-1] != "sectPr":
+            continue
+        section_type = next(
+            (
+                child.attrib.get(
+                    "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val"
+                )
+                for child in element
+                if child.tag.rsplit("}", 1)[-1] == "type"
+            ),
+            None,
+        )
+        return section_type != "continuous"
+    return False
 
 
 def iter_document_units(path: Path) -> Iterator[str]:
@@ -110,18 +353,69 @@ def iter_document_units(path: Path) -> Iterator[str]:
 
 
 def _iter_docx_units(path: Path) -> Iterator[str]:
-    from docx import Document
-    doc = Document(path)
-    for paragraph in doc.paragraphs:
-        text = paragraph.text.strip()
-        if text:
-            yield text
-    for table_number, table in enumerate(doc.tables, 1):
-        yield f"--- Table {table_number} ---"
-        for row in table.rows:
-            cells = [cell.text.replace("\n", " ").strip() for cell in row.cells]
-            if any(cells):
-                yield " | ".join(cells)
+    """Stream WordprocessingML without building python-docx's full object graph.
+
+    Preserve the historical output order exactly: all top-level paragraphs
+    first, then tables with their row text. document.xml is parsed twice so
+    memory stays bounded while matching the old paragraph/table behavior.
+    """
+    try:
+        package = zipfile.ZipFile(path)
+    except (OSError, zipfile.BadZipFile) as exc:
+        raise RuntimeError(f"เปิด Word package ไม่สำเร็จ: {exc}") from exc
+    with package:
+        member = "word/document.xml"
+        try:
+            stream = package.open(member)
+        except (KeyError, OSError) as exc:
+            raise RuntimeError(f"อ่าน Word document.xml ไม่สำเร็จ: {exc}") from exc
+        with stream:
+            table_depth = 0
+            try:
+                for event, element in ET.iterparse(stream, events=("start", "end")):
+                    local_name = element.tag.rsplit("}", 1)[-1]
+                    if event == "start" and local_name == "tbl":
+                        table_depth += 1
+                    elif event == "end" and local_name == "p" and table_depth == 0:
+                        text = _ooxml_text(element).strip()
+                        if text:
+                            yield text
+                        element.clear()
+                    elif event == "end" and local_name == "tbl":
+                        table_depth -= 1
+                        element.clear()
+            except ET.ParseError as exc:
+                raise RuntimeError(f"Word document.xml ไม่ถูกต้อง: {exc}") from exc
+
+        try:
+            stream = package.open(member)
+        except (KeyError, OSError) as exc:
+            raise RuntimeError(f"อ่าน Word document.xml ไม่สำเร็จ: {exc}") from exc
+        with stream:
+            table_number = 0
+            in_table = 0
+            try:
+                for event, element in ET.iterparse(stream, events=("start", "end")):
+                    local_name = element.tag.rsplit("}", 1)[-1]
+                    if event == "start" and local_name == "tbl":
+                        in_table += 1
+                        if in_table == 1:
+                            table_number += 1
+                            yield f"--- Table {table_number} ---"
+                    elif event == "end" and local_name == "tr" and in_table == 1:
+                        cells = [
+                            _ooxml_text(cell).replace("\n", " ").strip()
+                            for cell in element
+                            if cell.tag.rsplit("}", 1)[-1] == "tc"
+                        ]
+                        if any(cells):
+                            yield " | ".join(cells)
+                        element.clear()
+                    elif event == "end" and local_name == "tbl":
+                        in_table -= 1
+                        element.clear()
+            except ET.ParseError as exc:
+                raise RuntimeError(f"Word document.xml ไม่ถูกต้อง: {exc}") from exc
 
 
 def _iter_workbook_units(path: Path, suffix: str) -> Iterator[str]:
@@ -172,7 +466,30 @@ def _iter_pptx_units(path: Path) -> Iterator[str]:
             number_text = name[len(prefix) : -len(suffix)]
             if number_text.isdigit():
                 slides.append((int(number_text), name))
-        for number, member in sorted(slides):
+        ordered = [member for _number, member in sorted(slides)]
+        if "ppt/presentation.xml" in package.namelist():
+            try:
+                presentation = ET.fromstring(package.read("ppt/presentation.xml"))
+                relationships = ET.fromstring(package.read("ppt/_rels/presentation.xml.rels"))
+                targets = {
+                    item.attrib["Id"]: item.attrib["Target"]
+                    for item in relationships
+                    if item.tag.rsplit("}", 1)[-1] == "Relationship"
+                    and item.attrib.get("TargetMode") != "External"
+                }
+                ordered = []
+                members = set(package.namelist())
+                for slide in presentation.iter():
+                    if slide.tag.rsplit("}", 1)[-1] != "sldId":
+                        continue
+                    target = targets[slide.attrib["{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"]]
+                    member = posixpath.normpath(target.lstrip("/") if target.startswith("/") else "ppt/" + target)
+                    if not member.startswith("ppt/slides/") or member not in members:
+                        raise ValueError("invalid presentation slide target")
+                    ordered.append(member)
+            except (KeyError, ET.ParseError, ValueError) as exc:
+                raise RuntimeError("invalid PowerPoint presentation relationships") from exc
+        for number, member in enumerate(ordered, 1):
             yield f"--- Slide {number} ---"
             try:
                 stream = package.open(member)
@@ -239,7 +556,7 @@ def _iter_odf_content_units(path: Path) -> Iterator[str]:
         with zipfile.ZipFile(path) as package, package.open("content.xml") as stream:
             for _event, element in ET.iterparse(stream, events=("end",)):
                 if element.tag.rsplit("}", 1)[-1] in {"p", "h"}:
-                    text = "".join(element.itertext()).strip()
+                    text = _odf_text(element).strip()
                     if text:
                         yield text
                     element.clear()
@@ -247,6 +564,23 @@ def _iter_odf_content_units(path: Path) -> Iterator[str]:
         raise RuntimeError(f"เปิด OpenDocument package ไม่สำเร็จ: {exc}") from exc
     except ET.ParseError as exc:
         raise RuntimeError(f"content.xml ไม่ถูกต้อง: {exc}") from exc
+
+
+def _odf_text(element: ET.Element) -> str:
+    """Keep encoded separators and nested tails; do not expand untrusted space counts."""
+    pieces: list[str] = []
+    stack: list[ET.Element | str] = [element]
+    separators = {"s": " ", "tab": "\t", "line-break": "\n"}
+    while stack:
+        item = stack.pop()
+        if isinstance(item, str):
+            pieces.append(item)
+            continue
+        pieces.append(separators.get(item.tag.rsplit("}", 1)[-1], item.text or ""))
+        for child in reversed(list(item)):
+            stack.append(child.tail or "")
+            stack.append(child)
+    return "".join(pieces)
 
 
 def _extract_spotlight_document(path: Path) -> str:

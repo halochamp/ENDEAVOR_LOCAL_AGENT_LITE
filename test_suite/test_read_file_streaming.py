@@ -1,6 +1,3 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
 """PLAN.md §9.1 gate: streaming (bounded-RAM) read_file/indexer extraction
 must reproduce the exact same output the old fully-materialized algorithm
 produced, catch a secret straddling a chunk boundary, and keep large-fixture

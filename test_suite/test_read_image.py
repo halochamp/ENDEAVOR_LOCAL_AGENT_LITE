@@ -1,6 +1,3 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
 """OCR-only tests for tools/read_image.py — no model load needed (that path
 was verified live separately, see PLAN.md Phase 4 checkpoint notes)."""
 import io
@@ -11,11 +8,18 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pytest
 
 
-@pytest.fixture
-def require_ocr_helper():
-    from helpers import vision_ocr
-    if not vision_ocr._ensure_binary():
-        pytest.skip("optional macOS OCR helper is not bundled in the public source tree")
+@pytest.fixture(autouse=True)
+def isolated_read_image_state(tmp_path, monkeypatch):
+    """Keep tests out of the production App Support state and reset turn guards."""
+    import config
+    from tools import read_image
+
+    data_dir = tmp_path / "lite-state"
+    data_dir.mkdir()
+    monkeypatch.setattr(config, "DATA_DIR", data_dir)
+    read_image.begin_image_turn()
+    yield
+    read_image.end_image_turn()
 
 
 @pytest.fixture(scope="module")
@@ -68,6 +72,47 @@ def test_read_image_fails_closed_when_ocr_detector_fails(monkeypatch, test_image
     assert read_image._PENDING_IMAGES == []
 
 
+def test_vision_ocr_parses_confidence_and_candidates(monkeypatch):
+    from types import SimpleNamespace
+    from helpers import vision_ocr
+    monkeypatch.setattr(vision_ocr, "_ensure_binary", lambda: True)
+    monkeypatch.setattr(vision_ocr.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(
+        returncode=0,
+        stdout="0.1\t0.2\t0.3\t0.4\t0.625000\tน้ามัน\tน้ำมัน\tนำ้มัน",
+        stderr="",
+    ))
+    result = vision_ocr.read_layout("/tmp/image.png")
+    assert result[0]["text"] == "น้ามัน"
+    assert result[0]["confidence"] == pytest.approx(0.625)
+    assert result[0]["candidates"] == ["น้ามัน", "น้ำมัน", "นำ้มัน"]
+
+
+def test_vision_ocr_accepts_legacy_five_field_helper_output(monkeypatch):
+    from types import SimpleNamespace
+    from helpers import vision_ocr
+    monkeypatch.setattr(vision_ocr, "_ensure_binary", lambda: True)
+    monkeypatch.setattr(vision_ocr.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(
+        returncode=0, stdout="0\t0\t1\t1\tlegacy text", stderr=""
+    ))
+    result = vision_ocr.read_layout("/tmp/image.png")
+    assert result[0]["text"] == "legacy text"
+    assert result[0]["confidence"] is None
+    assert result[0]["candidates"] == ["legacy text"]
+
+
+def test_vision_ocr_rejects_out_of_range_confidence(monkeypatch):
+    from types import SimpleNamespace
+    from helpers import vision_ocr
+    monkeypatch.setattr(vision_ocr, "_ensure_binary", lambda: True)
+    monkeypatch.setattr(vision_ocr.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(
+        returncode=0,
+        stdout="0\t0\t1\t1\t1.500000\ttext\talt\t",
+        stderr="",
+    ))
+    with pytest.raises(RuntimeError):
+        vision_ocr.read_layout("/tmp/image.png")
+
+
 def test_vision_ocr_rejects_partially_malformed_helper_output(monkeypatch):
     from types import SimpleNamespace
     from helpers import vision_ocr
@@ -79,6 +124,23 @@ def test_vision_ocr_rejects_partially_malformed_helper_output(monkeypatch):
         vision_ocr.read_layout("/tmp/image.png")
 
 
+def test_read_image_repairs_only_deterministic_thai_mark_order(monkeypatch, test_image_path):
+    from tools import read_image
+    monkeypatch.setattr(read_image, "_ocr_bounded_copy", lambda *_args, **_kwargs: [{
+        "text": "นำ้ น้า",
+        "x": 0.1, "y": 0.1, "w": 0.3, "h": 0.1,
+        "confidence": 0.7,
+        "candidates": ["นำ้ น้า", "น้ำ น้ำ"],
+    }])
+    monkeypatch.setattr(read_image, "_decode_qr", lambda _data: [])
+
+    overview = read_image.run({"path": test_image_path})
+    assert "original image queued" in overview
+    result = read_image.run({"path": test_image_path, "detail": "text"})
+    assert "น้ำ น้า" in result
+    assert "น้ำ น้ำ" not in result
+
+
 def test_unsupported_extension(tmp_path):
     from tools import read_image
     p = tmp_path / "notanimage.txt"
@@ -87,27 +149,191 @@ def test_unsupported_extension(tmp_path):
     assert out.startswith("[error]")
 
 
-def test_ocr_extracts_english_and_thai(test_image_path, require_ocr_helper):
+def test_ocr_extracts_english_and_thai(test_image_path):
     from tools import read_image
-    read_image._PENDING_IMAGES.clear()
-    out = read_image.run({"path": test_image_path})
+    overview = read_image.run({"path": test_image_path})
+    assert "original image queued" in overview
+    out = read_image.run({"path": test_image_path, "detail": "text"})
     assert "Hello Agent Lite" in out
     assert "ทดสอบภาษาไทย" in out
 
 
-def test_image_queued_and_popped(test_image_path, require_ocr_helper):
+def test_image_queued_promoted_and_kept_for_whole_turn(test_image_path):
     from tools import read_image
     import config
-    read_image._PENDING_IMAGES.clear()
+
     read_image.run({"path": test_image_path})
-    queued = read_image._PENDING_IMAGES
+    queued = list(read_image._PENDING_IMAGES)
     assert len(queued) == 1
     assert queued[0].startswith(str(config.DATA_DIR / "pending_images"))
-    popped = read_image.pop_pending_images()
-    assert popped == queued
-    for pending in popped:
-        Path(pending).unlink(missing_ok=True)
+
+    active = read_image.active_turn_images()
     assert read_image._PENDING_IMAGES == []
+    assert active == queued
+    assert Path(active[0]).exists()
+    assert read_image.active_turn_images() == active
+
+
+def test_batch_accepts_four_rejects_five_and_preserves_order(tmp_path, monkeypatch):
+    from PIL import Image
+    from tools import read_image
+
+    paths = []
+    for index in range(5):
+        path = tmp_path / f"img-{index + 1}.png"
+        Image.new("RGB", (32, 24), "white").save(path)
+        paths.append(str(path))
+
+    monkeypatch.setattr(
+        read_image,
+        "_sensor_scan",
+        lambda _path, _png, retry_empty: ([], [], False),
+    )
+    result = read_image.run({"path": paths[:4]})
+    assert [f"[image:{i} {paths[i - 1]}]" for i in range(1, 5)] == [
+        line for line in result.splitlines() if line.startswith("[image:")
+    ]
+    assert len(read_image._PENDING_IMAGES) == 4
+
+    read_image.begin_image_turn()
+    rejected = read_image.run({"path": paths})
+    assert rejected.startswith("[error]")
+    assert "สูงสุด 4" in rejected
+
+
+def test_batch_selected_ocr_runs_only_after_overview(tmp_path, monkeypatch):
+    from PIL import Image
+    from tools import read_image
+
+    paths = []
+    for index in range(4):
+        path = tmp_path / f"ocr-{index + 1}.png"
+        Image.new("RGB", (32, 24), "white").save(path)
+        paths.append(str(path))
+
+    calls = []
+    def fake_prepare(src, *, overview, visible_ocr):
+        calls.append((src, overview, visible_ocr))
+        return {
+            "path": Path(src),
+            "frame": b"frame" if overview else None,
+            "ocr": f"OCR:{Path(src).name}" if visible_ocr else None,
+        }
+
+    monkeypatch.setattr(read_image, "_prepare_batch_source", fake_prepare)
+    monkeypatch.setattr(read_image, "_queue_encoded_bundle", lambda _path, frames: True)
+
+    first = read_image.run({"path": paths, "ocr": [1, 3]})
+    assert "OCR deferred" in first
+    assert all(not visible_ocr for _src, _overview, visible_ocr in calls)
+    assert read_image._OVERVIEW_SEEN == set(paths)
+
+    calls.clear()
+    second = read_image.run({"path": paths, "ocr": [1, 3]})
+    assert "OCR:ocr-1.png" in second
+    assert "OCR:ocr-3.png" in second
+    assert "OCR:ocr-2.png" not in second
+    assert "OCR:ocr-4.png" not in second
+    selected = [Path(src).name for src, _overview, visible_ocr in calls if visible_ocr]
+    assert selected == ["ocr-1.png", "ocr-3.png"]
+
+
+def test_batch_work_overlaps_with_at_most_four_workers(tmp_path, monkeypatch):
+    import threading
+    import time
+    from PIL import Image
+    from tools import read_image
+
+    paths = []
+    for index in range(4):
+        path = tmp_path / f"parallel-{index + 1}.png"
+        Image.new("RGB", (16, 16), "white").save(path)
+        paths.append(str(path))
+
+    state = {"active": 0, "peak": 0}
+    lock = threading.Lock()
+
+    def fake_prepare(src, *, overview, visible_ocr):
+        with lock:
+            state["active"] += 1
+            state["peak"] = max(state["peak"], state["active"])
+        time.sleep(0.05)
+        with lock:
+            state["active"] -= 1
+        return {"path": Path(src), "frame": b"frame"}
+
+    monkeypatch.setattr(read_image, "_prepare_batch_source", fake_prepare)
+    monkeypatch.setattr(read_image, "_queue_encoded_bundle", lambda _path, frames: True)
+    result = read_image.run({"path": paths})
+
+    assert not result.startswith("[error]")
+    assert 2 <= state["peak"] <= 4
+
+
+def test_langchain_schema_exposes_four_image_batch():
+    from tools import read_image
+
+    schema = read_image.read_image.args_schema.model_json_schema()
+    path_schema = schema["properties"]["path"]
+    rendered = str(path_schema)
+    assert "array" in rendered
+    assert "4" in rendered
+    assert "ocr" in schema["properties"]
+    assert "detail" in schema["properties"]
+    assert "find" in schema["properties"]
+
+
+def test_progressive_duplicate_guard_allows_same_sensor_after_overview(monkeypatch, test_image_path):
+    from helpers import turn_guard
+    from tools import read_image
+
+    boxes = [{"text": "ยอดรวม 42", "x": .1, "y": .7, "w": .2, "h": .05}]
+    monkeypatch.setattr(
+        read_image,
+        "_sensor_scan",
+        lambda _path, _png, retry_empty: (boxes, [], False),
+    )
+    turn_guard.reset("อ่านข้อความ")
+    args = {"path": test_image_path, "detail": "text"}
+
+    first = read_image.read_image.invoke(args)
+    assert "requested sensor deferred" in first
+    second = read_image.read_image.invoke(args)
+    assert "ยอดรวม 42" in second
+    assert "เรียกซ้ำ" not in second
+    assert not second.startswith("[error]")
+
+
+def test_outer_duplicate_guard_tracks_progressive_phase(test_image_path):
+    import agent
+    from tools import read_image
+
+    state = agent._ToolCallAttemptState()
+    args = {"path": test_image_path, "detail": "text"}
+    attempt, stop = agent._tool_call_attempt(state, "read_image", args)
+    assert (attempt, stop) == (1, False)
+
+    read_image._OVERVIEW_SEEN.add(test_image_path)
+    attempt, stop = agent._tool_call_attempt(state, "read_image", args)
+    assert (attempt, stop) == (1, False)
+
+
+def test_progressive_find_and_chart_defer_until_overview(monkeypatch, test_image_path):
+    from tools import read_image
+
+    monkeypatch.setattr(
+        read_image,
+        "_sensor_scan",
+        lambda _path, _png, retry_empty: ([], [], False),
+    )
+    deferred_find = read_image.run({"path": test_image_path, "find": "ยอดรวม"})
+    assert "requested sensor deferred" in deferred_find
+    assert 'find="ยอดรวม"' in deferred_find
+
+    read_image.begin_image_turn()
+    deferred_chart = read_image.run({"path": test_image_path, "detail": "chart"})
+    assert "requested sensor deferred" in deferred_chart
+    assert 'detail="chart"' in deferred_chart
 
 
 def test_normalize_preserves_exif_upright_crop_and_vlm_limit(tmp_path):
@@ -181,9 +407,9 @@ def test_qr_output_respects_tool_output_cap(monkeypatch, test_image_path):
     import config
     from tools import read_image
     monkeypatch.setattr(read_image, "_decode_qr", lambda _: ["https://example.test/" + "x" * 5000])
-    output = read_image.run({"path": test_image_path})
+    read_image.run({"path": test_image_path})
+    output = read_image.run({"path": test_image_path, "detail": "text"})
     assert len(output) <= config.TOOL_OUTPUT_TRUNCATE_CHARS + 40
-    read_image.discard_pending_images()
 
 
 def test_purge_orphaned_pending_images_removes_only_aged_agent_snapshots():

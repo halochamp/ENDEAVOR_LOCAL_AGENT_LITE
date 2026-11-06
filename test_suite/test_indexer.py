@@ -1,6 +1,3 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
 """No model needed — indexer.py + tools/rag_search.py against a throwaway corpus.
 
 Uses env var overrides (LITE_INDEX_ROOTS / LITE_DATA_DIR) so this never
@@ -81,6 +78,15 @@ def _search(query: str) -> str:
     import importlib
     import config
     importlib.reload(config)
+    # Filename-first lookup also scans config.KNOWLEDGE_DIR. Point it at an empty
+    # directory so these fixture-only tests never match files in the developer's
+    # real Knowledge Base (e.g. a document named "Information_...").
+    empty_kb = DATA_DIR / "empty_kb"
+    empty_kb.mkdir(parents=True, exist_ok=True)
+    for name in ("KNOWLEDGE_DIR", "KNOWLEDGE_SOURCE_DIR", "KNOWLEDGE_RAW_DIR", "RAW_DIR"):
+        setattr(config, name, empty_kb)
+    for name in ("KNOWLEDGE_MD_DIR", "MD_DIR"):
+        setattr(config, name, empty_kb / "md")
     import tools.rag_search as rag_search
     importlib.reload(rag_search)
     return rag_search.run({"query": query})
@@ -205,6 +211,7 @@ def test_normalize_extracted_text_removes_internal_thai_whitespace():
     assert indexer._normalize_extracted_text("น ้ำ สม ่าเสมอ ก า") == "น้ำสม่าเสมอกา"
     assert indexer._normalize_extracted_text("ก ่ \u0e49") == "ก่้"
     assert indexer._normalize_extracted_text("คำสั่ ง") == "คำสั่ง"
+    assert indexer._normalize_extracted_text("นำ้") == "น้ำ"
     assert indexer._normalize_extracted_text("คำ สั่ง ระบบ ภาษาไทย English 2567") == "คำสั่งระบบภาษาไทย English 2567"
     assert indexer._normalize_extracted_text("Latin x ่") == "Latin x ่"
 
@@ -399,6 +406,11 @@ def test_search_repairs_space_after_thai_combining_mark_in_query():
     assert "รายงานการเงิน.md" in out
 
 
+def test_search_repairs_thai_sara_am_tone_order_in_query():
+    out = _search("นำ้สะอาด")
+    assert "รายงานการเงิน.md" in out
+
+
 def test_search_removes_every_internal_thai_space_in_query():
     out = _search("คำ สั่ง ระบบ")
     assert "รายงานการเงิน.md" in out
@@ -439,36 +451,31 @@ def test_search_ignores_stray_punctuation_in_query():
 
 
 def test_search_zero_fts_hits_falls_back_to_filename_search():
-    """2026-07-24 (code helper for the small model): a query with zero FTS
-    matches (the FTS index only covers CORPUS, not the real project tree)
-    must not just say "not found" -- it broadens to the same bounded
-    filename walk used when no index exists at all (which always includes
-    config.PROJECT_ROOT), instead of making the model notice a dead end and
-    manually retry with a different query itself."""
-    out = _search("PLAN.md")  # real file under PROJECT_ROOT, absent from the CORPUS-only FTS index
-    assert "PLAN.md" in out
-    assert "ขยายผลการค้นหา" in out
+    """Zero-hit recovery stays inside the configured Knowledge Base root."""
+    out = _search("PLAN.md")  # absent from the disposable Knowledge Base corpus
+    assert "ขยายผลการค้นหา" not in out
+    assert "/sync_kb" in out or "ไม่พบ" in out
 
 
-def test_project_scope_zero_fts_hits_falls_back_to_source_content(monkeypatch, tmp_path):
-    """Project searches must locate source/config content absent from the
-    document-only global index, without leaking a sibling project's result."""
+def test_zero_fts_hits_fall_back_to_generated_knowledge_content(monkeypatch, tmp_path):
+    """Fallback content search reads generated Markdown, never project source."""
     import config
     import tools.rag_search as rag_search
     from helpers import search_scope
 
-    project = tmp_path / "ENDEAVOR_AGENT_LITE"
-    project.mkdir()
-    source = project / "indexer.py"
-    source.write_text("# trigram tokenizer implementation\n", encoding="utf-8")
-    monkeypatch.setattr(config, "PROJECT_ROOT", project)
+    md = tmp_path / "knowledge" / "md"
+    md.mkdir(parents=True)
+    generated = md / "indexer.md"
+    generated.write_text("# trigram tokenizer implementation\n", encoding="utf-8")
+    monkeypatch.setattr(config, "KNOWLEDGE_MD_DIR", md)
+    monkeypatch.setattr(config, "INDEX_ROOTS", [md])
     token = search_scope.set_request_query("มีไฟล์ไหนในโปรเจกต์นี้พูดถึง trigram tokenizer บ้าง")
     try:
         out = rag_search.run({"query": "trigram tokenizer"})
     finally:
         search_scope.reset_request_query(token)
-    assert "indexer.py" in out
-    assert str(project) in out
+    assert "indexer.md" in out
+    assert str(md) in out
     assert str(CORPUS) not in out
 
 
@@ -476,14 +483,16 @@ def test_project_artifact_paths_are_not_user_search_results(monkeypatch, tmp_pat
     import config
     import tools.rag_search as rag_search
 
-    project = tmp_path / "ENDEAVOR_AGENT_LITE"
-    project.mkdir()
-    monkeypatch.setattr(config, "PROJECT_ROOT", project)
-    (project / "config.py").write_text("PROJECT_ROOT = '.'\n", encoding="utf-8")
-    assert rag_search._is_project_artifact_path(str(project / "logs" / "tool_outputs" / "old.txt"))
-    assert rag_search._is_project_artifact_path(str(project / "workspect" / "_test_index_data" / "old.txt")) is False
-    assert rag_search._allowed_result_path(str(project / "config.py"))
-    assert not rag_search._allowed_result_path(str(project / "missing.py"))
+    md = tmp_path / "knowledge" / "md"
+    (md / "logs" / "tool_outputs").mkdir(parents=True)
+    (md / "logs" / "tool_outputs" / "old.md").write_text("old", encoding="utf-8")
+    (md / "config.md").write_text("KNOWLEDGE", encoding="utf-8")
+    monkeypatch.setattr(config, "KNOWLEDGE_MD_DIR", md)
+    monkeypatch.setattr(config, "INDEX_ROOTS", [md])
+    assert rag_search._is_project_artifact_path(str(md / "logs" / "tool_outputs" / "old.md"))
+    assert rag_search._is_project_artifact_path(str(md / "workspect" / "old.md")) is False
+    assert rag_search._allowed_result_path(str(md / "config.md"))
+    assert not rag_search._allowed_result_path(str(md / "missing.md"))
 
 
 def test_concise_filename_query_prefers_bounded_filename_fallback(monkeypatch):
@@ -593,18 +602,14 @@ def test_candidate_walk_skips_filename_too_long_errors(monkeypatch):
     assert CORPUS / "รายงานการเงิน.md" in found
 
 
-def test_default_index_roots_are_limited_to_finder_favorites(monkeypatch):
+def test_default_index_root_is_knowledge_markdown(monkeypatch):
     """`/index` must not regress to a whole-machine walk by default."""
     import importlib
     import config
 
     monkeypatch.delenv("LITE_INDEX_ROOTS", raising=False)
     importlib.reload(config)
-    assert config.INDEX_ROOTS == [
-        Path.home() / "Desktop",
-        Path.home() / "Documents",
-        Path.home() / "Downloads",
-    ]
+    assert config.INDEX_ROOTS == [config.KNOWLEDGE_MD_DIR]
 
     # The module-scoped fixture intentionally directs all subsequent tests to
     # its disposable corpus; restore that process-global configuration.
@@ -636,11 +641,11 @@ def test_stale_prune_check_that_hangs_does_not_block_the_whole_run(monkeypatch):
     real_is_stale = indexer._is_stale
     hung_path = str(CORPUS / "รายงานการเงิน.md")
 
-    def fake_is_stale(stored_path):
+    def fake_is_stale(stored_path, roots=None):
         if stored_path == hung_path:
             time.sleep(5)  # far longer than the timeout above
             return True
-        return real_is_stale(stored_path)
+        return real_is_stale(stored_path, roots)
 
     monkeypatch.setattr(indexer, "_is_stale", fake_is_stale)
 

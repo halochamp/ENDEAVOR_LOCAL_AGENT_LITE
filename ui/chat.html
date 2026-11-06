@@ -4,14 +4,106 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ENDEAVOR AGENT LITE</title>
+<script>
+(() => {
+  let theme = 'dark';
+  try {
+    const saved = localStorage.getItem('endeavor-lite-theme');
+    if (saved === 'light' || saved === 'dark') theme = saved;
+  } catch (_) {}
+  document.documentElement.dataset.theme = theme;
+})();
+</script>
 <style>
 /* ── Reset ────────────────────────────────────────────────────────── */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+:root, html[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #1e1e1e;
+  --surface: #252526;
+  --surface-2: #2d2d2d;
+  --surface-3: #2a2a2a;
+  --hover: #2a2d2e;
+  --hover-2: #333333;
+  --active: #37373d;
+  --border: #3c3c3c;
+  --border-strong: #454545;
+  --text: #d4d4d4;
+  --text-strong: #e0e0e0;
+  --text-subtle: #bbbbbb;
+  --muted: #808080;
+  --muted-dim: #5a5a5a;
+  --muted-faint: #555555;
+  --placeholder: #666666;
+  --accent: #569cd6;
+  --accent-border: #2d6a9f;
+  --accent-bg: #1e3a52;
+  --accent-hover: #264d70;
+  --user-bg: #1a3048;
+  --user-border: #2d5070;
+  --success: #4ec9b0;
+  --success-hover: #7ee0ca;
+  --success-border: #2d6a4f;
+  --warning: #d7ba7d;
+  --danger: #f48771;
+  --danger-bg: #5f1f1f;
+  --danger-button-bg: #4a1e1e;
+  --danger-border: #9f4040;
+  --danger-border-soft: #6a2d2d;
+  --danger-hover: #632626;
+  --syntax-yellow: #dcdcaa;
+  --syntax-blue: #9cdcfe;
+  --syntax-green: #b5cea8;
+  --code-accent: #ce9178;
+  --shadow: rgba(0,0,0,0.50);
+}
+
+html[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f7f7f8;
+  --surface: #ffffff;
+  --surface-2: #f0f1f3;
+  --surface-3: #f4f5f6;
+  --hover: #e9eaec;
+  --hover-2: #e2e4e7;
+  --active: #e5eef8;
+  --border: #d7d9dd;
+  --border-strong: #c5c8ce;
+  --text: #202124;
+  --text-strong: #111318;
+  --text-subtle: #4a4d52;
+  --muted: #6b7078;
+  --muted-dim: #7d828a;
+  --muted-faint: #8d9299;
+  --placeholder: #8d9299;
+  --accent: #2563a6;
+  --accent-border: #8bb8dd;
+  --accent-bg: #e7f1fb;
+  --accent-hover: #d6e9f8;
+  --user-bg: #e7f1fb;
+  --user-border: #b7d6ee;
+  --success: #087f5b;
+  --success-hover: #056c4c;
+  --success-border: #80bba8;
+  --warning: #876400;
+  --danger: #b42318;
+  --danger-bg: #fde8e7;
+  --danger-button-bg: #fff0ef;
+  --danger-border: #d7908a;
+  --danger-border-soft: #e0aaa5;
+  --danger-hover: #f8d8d5;
+  --syntax-yellow: #765d00;
+  --syntax-blue: #0b5f9e;
+  --syntax-green: #2d6f2c;
+  --code-accent: #9b3a20;
+  --shadow: rgba(31,35,40,0.14);
+}
+
 html, body {
   height: 100%;
-  background: #1e1e1e;
-  color: #d4d4d4;
+  background: var(--bg);
+  color: var(--text);
   font-family: -apple-system, 'Segoe UI', system-ui, sans-serif;
   font-size: 13px;
   overflow: hidden;
@@ -28,8 +120,8 @@ html, body {
 
 /* ── Icon bar (60px, always visible) ─────────────────────────────── */
 #icon-bar {
-  background: #252526;
-  border-right: 1px solid #3c3c3c;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -48,20 +140,24 @@ html, body {
   background: transparent;
   border: none;
   border-left: 2px solid transparent;
-  color: #808080;
+  color: var(--muted);
   font-size: 20px;
   border-radius: 0 6px 6px 0;
   cursor: pointer;
   transition: color 0.1s, background 0.1s;
   flex-shrink: 0;
 }
-.icon-btn:hover { background: #2d2d2d; color: #d4d4d4; }
-.icon-btn.active { color: #d4d4d4; border-left-color: #569cd6; background: #37373d; }
+.icon-btn:hover { background: var(--surface-2); color: var(--text); }
+.icon-btn.active { color: var(--text); border-left-color: var(--accent); background: var(--active); }
+
+.icon-spacer { flex: 1; }
+#theme-toggle { margin-bottom: 8px; }
+.icon-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* ── Side panel (320px when open) ────────────────────────────────── */
 #panel {
-  background: #252526;
-  border-right: 1px solid #3c3c3c;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -71,11 +167,11 @@ html, body {
 .panel-hdr {
   font-size: 10px;
   font-weight: 700;
-  color: #bbb;
+  color: var(--text-subtle);
   text-transform: uppercase;
   letter-spacing: 1px;
   padding: 9px 12px 7px;
-  border-bottom: 1px solid #3c3c3c;
+  border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
 
@@ -87,7 +183,7 @@ html, body {
 }
 
 #file-viewer {
-  border-top: 1px solid #3c3c3c;
+  border-top: 1px solid var(--border);
   flex-shrink: 0;
   max-height: 50%;
   overflow-y: auto;
@@ -100,20 +196,20 @@ html, body {
   padding: 4px 8px;
   font-size: 12px;
   font-weight: 600;
-  border-bottom: 1px solid #3c3c3c;
+  border-bottom: 1px solid var(--border);
 }
 .fv-header button {
-  background: none; border: none; color: #808080;
+  background: none; border: none; color: var(--muted);
   cursor: pointer; font-size: 14px; padding: 2px 6px;
   border-radius: 3px;
 }
-.fv-header button:hover { color: #d4d4d4; background: #3c3c3c; }
+.fv-header button:hover { color: var(--text); background: var(--border); }
 
 .fv-code {
   font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
   font-size: 11px;
-  background: #1e1e1e;
-  color: #d4d4d4;
+  background: var(--bg);
+  color: var(--text);
   padding: 8px 10px;
   overflow: auto;
   white-space: pre;
@@ -126,7 +222,7 @@ html, body {
   width: 100%;
   padding: 5px 8px;
   background: transparent;
-  color: #d4d4d4;
+  color: var(--text);
   border: none;
   border-radius: 4px;
   cursor: pointer;
@@ -137,7 +233,7 @@ html, body {
   text-overflow: ellipsis;
   font-family: inherit;
 }
-.p-btn:hover { background: #2a2d2e; }
+.p-btn:hover { background: var(--hover); }
 .p-btn:disabled { opacity: 0.45; cursor: default; }
 
 /* File row with action buttons */
@@ -148,14 +244,14 @@ html, body {
   gap: 2px;
   padding: 1px 2px;
 }
-.file-row:hover { background: #2a2d2e; }
+.file-row:hover { background: var(--hover); }
 .file-row:hover .file-actions { opacity: 1; }
 .file-name {
   flex: 1;
   padding: 4px 6px;
   cursor: pointer;
   font-size: 12px;
-  color: #d4d4d4;
+  color: var(--text);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -176,77 +272,102 @@ html, body {
 .file-act-btn {
   background: none;
   border: none;
-  color: #808080;
+  color: var(--muted);
   cursor: pointer;
   font-size: 12px;
   padding: 3px 5px;
   border-radius: 3px;
   line-height: 1;
 }
-.file-act-btn:hover { background: #3c3c3c; color: #d4d4d4; }
-.file-act-btn.del:hover { background: #5f1f1f; color: #f48771; }
+.file-act-btn:hover { background: var(--border); color: var(--text); }
+.file-act-btn.del:hover { background: var(--danger-bg); color: var(--danger); }
 
 .p-section {
   font-size: 10px;
-  color: #808080;
+  color: var(--muted);
   text-transform: uppercase;
   letter-spacing: 0.7px;
   padding: 6px 8px 2px;
 }
 
-.p-divider { border: none; border-top: 1px solid #3c3c3c; margin: 5px 0; }
+.p-divider { border: none; border-top: 1px solid var(--border); margin: 5px 0; }
+
+/* Deterministic RAG panel — direct HTTP backend, no LLM/ReAct. */
+.rag-box { padding: 6px; }
+.rag-note { color: var(--muted); font-size: 10px; line-height: 1.4; margin: 2px 2px 7px; }
+.rag-input {
+  width: 100%; box-sizing: border-box; padding: 7px 8px; margin-bottom: 6px;
+  border: 1px solid var(--border-strong); border-radius: 4px; background: var(--bg);
+  color: var(--text); font: 12px/1.4 inherit; outline: none;
+}
+.rag-input:focus { border-color: var(--accent); }
+.rag-actions { display: flex; gap: 5px; margin-bottom: 7px; }
+.rag-actions button {
+  flex: 1; border: 1px solid var(--border-strong); border-radius: 4px; padding: 6px 7px;
+  background: var(--surface-2); color: var(--text); cursor: pointer; font: 11px inherit;
+}
+.rag-actions button:hover { background: var(--border); }
+.rag-actions button:disabled { opacity: .45; cursor: default; }
+.rag-status { color: var(--success); font-size: 10px; min-height: 14px; margin: 2px 2px 6px; }
+.rag-status.error { color: var(--danger); }
+.rag-result {
+  border-top: 1px solid var(--border); padding: 8px 4px 4px; color: var(--text);
+  font: 11px/1.45 'SF Mono', 'Fira Code', monospace; white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.rag-result a.local-path { color: var(--success); text-decoration: underline dashed; }
 
 /* Activity items */
 .act-item {
   font-size: 11px;
-  border-left: 2px solid #3c3c3c;
+  border-left: 2px solid var(--border);
   padding: 2px 6px;
   margin: 2px 0;
 }
-.act-name  { color: #dcdcaa; }
-.act-det   { color: #808080; font-size: 10px; display: block; margin-top: 1px; }
-.act-ts    { color: #555; font-size: 10px; display: block; }
-.act-details { margin-top: 3px; color: #9cdcfe; font-size: 10px; }
+.act-name  { color: var(--syntax-yellow); }
+.act-det   { color: var(--muted); font-size: 10px; display: block; margin-top: 1px; }
+.act-ts    { color: var(--muted-faint); font-size: 10px; display: block; }
+.act-details { margin-top: 3px; color: var(--syntax-blue); font-size: 10px; }
 .act-details summary { cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.act-args { margin: 3px 0 1px; color: #b5cea8; font: 10px/1.35 'SF Mono', 'Fira Code', monospace; white-space: pre-wrap; word-break: break-word; }
-.act-phase { color: #808080; font-size: 11px; padding: 2px 6px; }
-.act-sep   { border-top: 1px solid #3c3c3c; margin: 4px 2px; }
+.act-args { margin: 3px 0 1px; color: var(--syntax-green); font: 10px/1.35 'SF Mono', 'Fira Code', monospace; white-space: pre-wrap; word-break: break-word; }
+.act-phase { color: var(--muted); font-size: 11px; padding: 2px 6px; }
+.act-sep   { border-top: 1px solid var(--border); margin: 4px 2px; }
 
 /* File attachment */
 #file-badge {
   display: none; align-items: center; gap: 6px;
-  padding: 4px 10px; background: #252526; border-top: 1px solid #3c3c3c;
-  color: #9cdcfe; font-size: 11px;
+  padding: 4px 10px; background: var(--surface); border-top: 1px solid var(--border);
+  color: var(--syntax-blue); font-size: 11px;
 }
 #file-badge-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#file-badge-remove { border: 0; background: none; color: #808080; cursor: pointer; font-size: 14px; }
-#file-badge-remove:hover { color: #f48771; }
-#attach-btn { border: 1px solid #454545; background: #2d2d2d; color: #d4d4d4; border-radius: 4px; padding: 5px 8px; cursor: pointer; }
-#attach-btn:hover, #attach-btn:focus { background: #3c3c3c; }
+#file-badge-remove { border: 0; background: none; color: var(--muted); cursor: pointer; font-size: 14px; }
+#file-badge-remove:hover { color: var(--danger); }
+#attach-btn { height: 34px; border: 1px solid var(--border-strong); background: var(--surface-2); color: var(--text); border-radius: 4px; padding: 0 8px; cursor: pointer; }
+#attach-btn:hover, #attach-btn:focus { background: var(--border); }
 
 /* History items */
 .hist-details {
-  border: 1px solid #3c3c3c;
+  border: 1px solid var(--border);
   border-radius: 4px;
   margin-bottom: 3px;
-  background: #2a2a2a;
+  background: var(--surface-3);
 }
 .hist-details summary {
   padding: 5px 8px;
   cursor: pointer;
   font-size: 11px;
-  color: #ccc;
+  color: var(--text);
   list-style: none;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   user-select: none;
 }
-.hist-details summary:hover { background: #333; border-radius: 4px; }
-.hist-details[open] summary { border-bottom: 1px solid #3c3c3c; }
+.hist-details summary:hover { background: var(--hover-2); border-radius: 4px; }
+.hist-details[open] summary { border-bottom: 1px solid var(--border); }
 .hist-body { padding: 8px; font-size: 12px; }
-.hist-lbl  { color: #808080; font-size: 10px; text-transform: uppercase; margin-bottom: 3px; }
-.hist-txt  { white-space: pre-wrap; word-break: break-word; color: #d4d4d4; }
+.hist-lbl  { color: var(--muted); font-size: 10px; text-transform: uppercase; margin-bottom: 3px; }
+.hist-txt  { white-space: pre-wrap; word-break: break-word; color: var(--text); }
 
 /* ── Chat area ────────────────────────────────────────────────────── */
 #chat {
@@ -254,13 +375,13 @@ html, body {
   flex-direction: column;
   min-width: 0;
   height: 100vh;
-  background: #1e1e1e;
+  background: var(--bg);
 }
 
 /* Header */
 #header {
   padding: 7px 16px 6px;
-  border-bottom: 1px solid #3c3c3c;
+  border-bottom: 1px solid var(--border);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -268,14 +389,14 @@ html, body {
   flex-shrink: 0;
 }
 #hdr-title { font-weight: 700; font-size: 13px; white-space: nowrap; }
-#hdr-sub   { font-size: 10px; color: #5a5a5a; }
+#hdr-sub   { font-size: 10px; color: var(--muted-dim); }
 #badges    { display: flex; gap: 5px; align-items: center; flex-wrap: wrap; }
 
 .badge {
   font-size: 11px;
   padding: 2px 9px;
   border-radius: 10px;
-  color: #5a5a5a;
+  color: var(--muted-dim);
   white-space: nowrap;
 }
 
@@ -284,14 +405,14 @@ html, body {
   padding: 2px 9px;
   border-radius: 10px;
   white-space: nowrap;
-  border: 1px solid #3a3a3a;
-  background: #1e1e1e;
-  color: #ccc;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
   cursor: pointer;
 }
 .srv-btn:disabled { cursor: default; opacity: 0.6; }
-.srv-btn-on  { border-color: #2d6a4f; color: #4ec9b0; }
-.srv-btn-off { border-color: #6a2d2d; color: #f48771; }
+.srv-btn-on  { border-color: var(--success-border); color: var(--success); }
+.srv-btn-off { border-color: var(--danger-border-soft); color: var(--danger); }
 
 /* Messages */
 #messages {
@@ -323,40 +444,40 @@ html, body {
   margin-bottom: 4px;
   letter-spacing: 0.3px;
 }
-.msg-user .msg-label      { color: #569cd6; }
-.msg-assistant .msg-label { color: #4ec9b0; }
+.msg-user .msg-label      { color: var(--accent); }
+.msg-assistant .msg-label { color: var(--success); }
 
 .msg-content {
   line-height: 1.65;
   word-break: break-word;
-  color: #d4d4d4;
+  color: var(--text);
   padding: 8px 12px;
   border-radius: 4px;
 }
 .msg-user .msg-content {
-  background: #1a3048;
-  border: 1px solid #2d5070;
+  background: var(--user-bg);
+  border: 1px solid var(--user-border);
   border-radius: 12px 2px 12px 12px;
   text-align: left;
 }
 .msg-assistant .msg-content {
-  background: #252526;
-  border: 1px solid #3c3c3c;
+  background: var(--surface);
+  border: 1px solid var(--border);
   border-radius: 2px 12px 12px 12px;
 }
 .msg-content p  { margin-bottom: 5px; }
 .msg-content p:last-child { margin-bottom: 0; }
 .msg-content code {
-  background: #2d2d2d;
-  color: #ce9178;
+  background: var(--surface-2);
+  color: var(--code-accent);
   padding: 1px 4px;
   border-radius: 3px;
   font-family: 'SF Mono', 'Fira Code', monospace;
   font-size: 12px;
 }
 .msg-content pre {
-  background: #252526;
-  border: 1px solid #3c3c3c;
+  background: var(--surface);
+  border: 1px solid var(--border);
   border-radius: 4px;
   padding: 10px 12px;
   overflow-x: auto;
@@ -365,46 +486,46 @@ html, body {
 /* md() uses a <pre> as its whitespace-preserving text wrapper.  The
    assistant bubble already owns the background and border; keep the wrapper
    from rendering a second nested bubble. */
-.msg-content pre code { background: none; padding: 0; color: #d4d4d4; }
+.msg-content pre code { background: none; padding: 0; color: var(--text); }
 .msg-content h1,.msg-content h2,.msg-content h3 {
-  color: #e0e0e0; margin: 8px 0 4px; font-weight: 600;
+  color: var(--text-strong); margin: 8px 0 4px; font-weight: 600;
 }
 .msg-content ul,.msg-content ol { padding-left: 20px; margin: 4px 0; }
 .msg-content li { margin-bottom: 2px; }
-.msg-content a  { color: #569cd6; }
+.msg-content a  { color: var(--accent); }
 .msg-content a.local-path {
-  color: #4ec9b0;
+  color: var(--success);
   cursor: pointer;
   text-decoration: underline dashed;
 }
-.msg-content a.local-path:hover { color: #7ee0ca; }
-.msg-content hr { border-color: #3c3c3c; margin: 8px 0; }
+.msg-content a.local-path:hover { color: var(--success-hover); }
+.msg-content hr { border-color: var(--border); margin: 8px 0; }
 .msg-content blockquote {
-  border-left: 3px solid #569cd6;
+  border-left: 3px solid var(--accent);
   padding-left: 10px;
-  color: #9a9a9a;
+  color: var(--muted);
   margin: 4px 0;
 }
 .msg-content table { border-collapse: collapse; margin: 6px 0; font-size: 12px; }
-.msg-content th,.msg-content td { border: 1px solid #3c3c3c; padding: 4px 8px; }
-.msg-content th { background: #2d2d2d; }
+.msg-content th,.msg-content td { border: 1px solid var(--border); padding: 4px 8px; }
+.msg-content th { background: var(--surface-2); }
 
 .msg-system {
   text-align: center;
-  color: #808080;
+  color: var(--muted);
   font-size: 11px;
   padding: 2px 0;
   white-space: pre-wrap;
 }
 
-.cursor { color: #569cd6; animation: blink 0.9s step-end infinite; }
+.cursor { color: var(--accent); animation: blink 0.9s step-end infinite; }
 @keyframes blink { 50% { opacity: 0; } }
 
 /* Phase / spinner bar */
 #phase-bar {
   padding: 3px 16px 2px;
   font-size: 12px;
-  color: #4ec9b0;
+  color: var(--success);
   line-height: 1.45;
   flex-shrink: 0;
   min-height: 0;
@@ -415,7 +536,7 @@ html, body {
 #phase-bar.visible { max-height: 60px; }
 #phase-bar .phase-main { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #phase-bar .phase-detail {
-  color: #808080;
+  color: var(--muted);
   padding-left: 14px;
   white-space: nowrap;
   overflow: hidden;
@@ -425,35 +546,60 @@ html, body {
 /* Input area */
 #input-area {
   padding: 8px 16px 6px;
-  border-top: 1px solid #3c3c3c;
+  border-top: 1px solid var(--border);
   display: flex;
   gap: 8px;
   align-items: center;
   flex-shrink: 0;
 }
 
-#input {
-  flex: 1;
-  background: #3c3c3c;
-  border: 1px solid #454545;
+#effort-controls {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+}
+#effort-select {
+  height: 34px;
+  padding: 0 24px 0 8px;
+  background: var(--border);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
   border-radius: 6px;
-  color: #d4d4d4;
+  cursor: pointer;
+  font-size: 12px;
+  font-family: inherit;
+  outline: none;
+}
+#effort-select:hover, #effort-select:focus {
+  background: var(--hover);
+  border-color: var(--accent-border);
+}
+#effort-select:disabled { opacity: 0.45; cursor: not-allowed; }
+
+#input {
+  height: 34px;
+  flex: 1;
+  background: var(--border);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  color: var(--text);
   padding: 8px 12px;
   font-size: 13px;
   font-family: inherit;
   outline: none;
-  caret-color: #569cd6;
+  caret-color: var(--accent);
   transition: border-color 0.15s;
 }
-#input:focus     { border-color: #569cd6; }
+#input:focus     { border-color: var(--accent); }
 #input:disabled  { opacity: 0.45; cursor: not-allowed; }
-#input::placeholder { color: #666; }
+#input::placeholder { color: var(--placeholder); }
 
 #send-btn {
-  padding: 8px 14px;
-  background: #1e3a52;
-  border: 1px solid #2d6a9f;
-  color: #569cd6;
+  height: 34px;
+  padding: 0 14px;
+  background: var(--accent-bg);
+  border: 1px solid var(--accent-border);
+  color: var(--accent);
   border-radius: 6px;
   cursor: pointer;
   font-size: 13px;
@@ -461,14 +607,14 @@ html, body {
   white-space: nowrap;
   transition: background 0.1s;
 }
-#send-btn:hover   { background: #264d70; }
+#send-btn:hover   { background: var(--accent-hover); }
 #send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
 #stop-btn {
   padding: 8px 14px;
-  background: #4a1e1e;
-  border: 1px solid #9f4040;
-  color: #f48771;
+  background: var(--danger-button-bg);
+  border: 1px solid var(--danger-border);
+  color: var(--danger);
   border-radius: 6px;
   cursor: pointer;
   font-size: 13px;
@@ -476,15 +622,15 @@ html, body {
   white-space: nowrap;
   transition: background 0.1s;
 }
-#stop-btn:hover   { background: #632626; }
+#stop-btn:hover   { background: var(--danger-hover); }
 #stop-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
 /* Context bar */
 #ctx-bar {
   padding: 3px 16px 4px;
   font-size: 11px;
-  color: #808080;
-  border-top: 1px solid #3c3c3c;
+  color: var(--muted);
+  border-top: 1px solid var(--border);
   display: flex;
   align-items: center;
   gap: 8px;
@@ -493,7 +639,7 @@ html, body {
 #ctx-track {
   width: 100px;
   height: 3px;
-  background: #3c3c3c;
+  background: var(--border);
   border-radius: 2px;
   overflow: hidden;
   flex-shrink: 0;
@@ -501,7 +647,7 @@ html, body {
 #ctx-fill {
   height: 100%;
   border-radius: 2px;
-  background: #4ec9b0;
+  background: var(--success);
   width: 0%;
   transition: width 0.4s, background 0.3s;
 }
@@ -511,10 +657,10 @@ html, body {
   position: absolute;
   bottom: calc(100% + 4px);
   left: 0; right: 0;
-  background: #252526;
-  border: 1px solid #454545;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
   border-radius: 6px;
-  box-shadow: 0 -4px 16px rgba(0,0,0,0.5);
+  box-shadow: 0 -4px 16px var(--shadow);
   z-index: 50;
   overflow: hidden;
   display: none;
@@ -531,19 +677,19 @@ html, body {
   transition: background 0.08s;
 }
 .cp-item:hover, .cp-item.active {
-  background: #2a2d2e;
-  border-left-color: #569cd6;
+  background: var(--hover);
+  border-left-color: var(--accent);
 }
-.cp-name { color: #569cd6; font-size: 13px; font-weight: 600; white-space: nowrap; }
-.cp-desc { color: #808080; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cp-name { color: var(--accent); font-size: 13px; font-weight: 600; white-space: nowrap; }
+.cp-desc { color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* Reconnect banner */
 #banner {
   display: none;
   position: fixed;
   top: 0; left: 0; right: 0;
-  background: #5f1f1f;
-  color: #f48771;
+  background: var(--danger-bg);
+  color: var(--danger);
   text-align: center;
   padding: 5px;
   font-size: 12px;
@@ -554,8 +700,8 @@ html, body {
 /* Scrollbar */
 ::-webkit-scrollbar { width: 5px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: #3c3c3c; border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: #4a4a4a; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--border-strong); }
 </style>
 </head>
 <body>
@@ -567,9 +713,13 @@ html, body {
   <!-- ── Icon bar ───────────────────────────────────────────────── -->
   <div id="icon-bar">
     <button class="icon-btn" data-panel="files"    title="Workspace (📁)" onclick="togglePanel('files')">📁</button>
+    <button class="icon-btn" data-panel="rag"      title="RAG Search (🔎)" onclick="togglePanel('rag')">🔎</button>
+    <button class="icon-btn" data-panel="pdf"      title="PDF to Text (📄)" onclick="togglePanel('pdf')">📄</button>
     <button class="icon-btn" data-panel="activity" title="Activity (⚡)"  onclick="togglePanel('activity')">⚡</button>
     <button class="icon-btn" data-panel="history"  title="History (🕐)"  onclick="togglePanel('history')">🕐</button>
     <button class="icon-btn" data-panel="commands" title="Commands (📋)" onclick="togglePanel('commands')">📋</button>
+    <div class="icon-spacer"></div>
+    <button class="icon-btn" id="theme-toggle" type="button" title="Switch to Light" aria-label="Switch to Light theme" onclick="toggleTheme()">☀️</button>
   </div>
 
   <!-- ── Side panel ────────────────────────────────────────────── -->
@@ -606,6 +756,13 @@ html, body {
       <input id="input" type="text"
         placeholder="พิมพ์ข้อความ… (/ สำหรับคำสั่ง)"
         autocomplete="off">
+      <div id="effort-controls" role="group" aria-label="Effort">
+        <select id="effort-select" onchange="setEffort(this.value)" title="เลือก effort สำหรับ turn ถัดไป">
+          <option value="low">Low</option>
+          <option value="medium">Medium</option>
+          <option value="high">High</option>
+        </select>
+      </div>
       <button id="attach-btn" type="button" title="แนบไฟล์" onclick="chooseAttachment()">📎</button>
       <button id="send-btn" onclick="doSend()">ส่ง ↵</button>
       <button id="stop-btn" type="button" style="display:none" onclick="stopTurn()">⏹ หยุด</button>
@@ -634,19 +791,22 @@ const MAX_ACT        = 500;
 // trims the visible scrollback, never the model's context.
 const MAX_DOM_MESSAGES = 50;
 const SPINNER        = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏'];
-const FN_ICONS       = {clear:'🗑', history:'🕐', index:'🔎'};
+const FN_ICONS       = {clear:'🗑', history:'🕐', index:'🔎', sync_kb:'🔄'};
 
 if (window.marked) marked.setOptions({gfm: true, breaks: true});
 
 // ── State ─────────────────────────────────────────────────────────────────────
 const S = {
   ws: null, token: '', connected: false,
+  theme: document.documentElement.dataset.theme === 'light' ? 'light' : 'dark',
   reconnectTimer: null, spinTimer: null, spinTick: 0,
 
   // Server info
-  model: '', serverUp: false, serverPort: 8090, online: false,
+  model: '', serverUp: false, serverState: 'down', serverPort: 8090, online: false,
   serverBusy: false, serverPollTimer: null,
   skill: '', skills: [], builtinCmds: [],
+  effort: readStoredEffort(),
+  effortBudgets: {low: 128, medium: 256, high: 512},
 
   // Files
   files: [], filesTruncated: false, filesLimit: 0, currentPath: '', rootPath: '', openFile: null,
@@ -656,6 +816,14 @@ const S = {
 
   // History
   histPairs: null, histTotal: 0, histLoading: false,
+
+  // Direct deterministic RAG panel (never enters chat/model history)
+  ragQuery: '', ragResult: '', ragStatus: '', ragError: false, ragBusy: false, ragSyncJobId: '',
+
+  // Direct PDF -> text panel. Extraction/OCR bypass chat; Thai cleanup is an
+  // optional no-think local-model stage batched across several OCR pages.
+  pdfBusy: false, pdfJobId: '', pdfStatus: '', pdfError: false,
+  pdfResult: null, pdfRewriteThai: true,
 
   // Run state
   busy: false, panelView: null,
@@ -674,6 +842,37 @@ function esc(s) {
   return String(s ?? '')
     .replace(/&/g,'&amp;').replace(/</g,'&lt;')
     .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function readStoredEffort() {
+  try {
+    const value = localStorage.getItem('endeavor-lite-effort');
+    return ['low', 'medium', 'high'].includes(value) ? value : 'medium';
+  } catch (_) { return 'medium'; }
+}
+
+function hasStoredEffort() {
+  try { return ['low', 'medium', 'high'].includes(localStorage.getItem('endeavor-lite-effort')); }
+  catch (_) { return false; }
+}
+
+function renderEffortControls() {
+  const select = $('effort-select');
+  if (!select) return;
+  select.value = S.effort;
+  select.disabled = S.busy;
+  [...select.options].forEach(option => {
+    const name = option.value[0].toUpperCase() + option.value.slice(1);
+    option.textContent = `Effort: ${name}`;
+  });
+  select.title = 'เลือก effort สำหรับ turn ถัดไป';
+}
+
+function setEffort(value) {
+  if (S.busy || !['low', 'medium', 'high'].includes(value)) return;
+  S.effort = value;
+  try { localStorage.setItem('endeavor-lite-effort', value); } catch (_) {}
+  renderEffortControls();
 }
 
 function stripThink(text) {
@@ -977,8 +1176,31 @@ $('panel-body').addEventListener('click', handleLocalPathClick);
 
 function $(id) { return document.getElementById(id); }
 
+const THEME_KEY = 'endeavor-lite-theme';
+
+function applyTheme(theme, persist = true) {
+  const next = theme === 'light' ? 'light' : 'dark';
+  S.theme = next;
+  document.documentElement.dataset.theme = next;
+  if (persist) {
+    try { localStorage.setItem(THEME_KEY, next); } catch (_) {}
+  }
+  const btn = $('theme-toggle');
+  if (btn) {
+    const dark = next === 'dark';
+    btn.textContent = dark ? '☀️' : '🌙';
+    btn.title = dark ? 'Switch to Light' : 'Switch to Dark';
+    btn.setAttribute('aria-label', dark ? 'Switch to Light theme' : 'Switch to Dark theme');
+  }
+}
+
+function toggleTheme() {
+  applyTheme(S.theme === 'dark' ? 'light' : 'dark');
+}
+
 // ── WebSocket ─────────────────────────────────────────────────────────────────
 async function init() {
+  applyTheme(S.theme, false);
   try {
     const r = await fetch('/ui-token');
     const d = await r.json();
@@ -1012,6 +1234,7 @@ function onOpen() {
 function onClose() {
   S.connected = false;
   S.serverUp  = false;
+  S.serverState = 'down';
   updateHeader();
   $('banner').classList.add('show');
   scheduleReconnect();
@@ -1027,12 +1250,17 @@ function onEvent(ev) {
   const t = ev.type;
 
   if (t === 'status') {
-    S.serverUp = ev.server_up; S.serverPort = ev.server_port || 8090;
+    S.serverUp = ev.server_up; S.serverState = ev.server_state || (ev.server_up ? 'ready' : 'down'); S.serverPort = ev.server_port || 8090;
     S.online = ev.online === true;
     S.ctxChars = ev.history_chars || 0;
     S.ctxMax = ev.history_max_chars || CTX_MAX_DEF;
     S.skill = ev.skill || ''; S.skills = ev.skills || [];
     S.builtinCmds = ev.builtin_cmds || []; S.model = ev.model || '';
+    if (ev.thinking_budgets && typeof ev.thinking_budgets === 'object') {
+      S.effortBudgets = Object.assign({}, S.effortBudgets, ev.thinking_budgets);
+    }
+    if (!hasStoredEffort() && ['low', 'medium', 'high'].includes(ev.effort)) S.effort = ev.effort;
+    renderEffortControls();
     updateHeader();
     if (S.panelView === 'commands') renderPanel();
 
@@ -1094,7 +1322,7 @@ function onEvent(ev) {
     if (S.panelView === 'commands') renderPanel();
 
   } else if (t === '_disconnect') {
-    S.serverUp = false; updateHeader();
+    S.serverUp = false; S.serverState = 'down'; updateHeader();
 
   // ── Streaming ──────────────────────────────────────────────────
   } else if (t === 'start') {
@@ -1187,7 +1415,7 @@ function onEvent(ev) {
       S.pendingRevealPath = false;
       appendSystem(`⚠ ${ev.msg || 'เปิดไฟล์ไม่สำเร็จ'}`);
     } else if (S.streamEl)
-      S.streamEl.innerHTML = `<span style="color:#f48771">❌ ${esc(ev.msg||'error')}</span>`;
+      S.streamEl.innerHTML = `<span style="color:var(--danger)">❌ ${esc(ev.msg||'error')}</span>`;
     else
       appendSystem(`❌ ${ev.msg || 'error'}`);
     S.busy = false; updateInput();
@@ -1195,7 +1423,7 @@ function onEvent(ev) {
   } else if (t === 'cancelled') {
     stopSpinner();
     if (S.streamEl)
-      S.streamEl.innerHTML = '<span style="color:#808080">✕ ยกเลิกแล้ว</span>';
+      S.streamEl.innerHTML = '<span style="color:var(--muted)">✕ ยกเลิกแล้ว</span>';
     S.busy = false; updateInput();
   }
 }
@@ -1206,21 +1434,18 @@ function updateHeader() {
   const short = raw.includes('/') ? raw.split('/').pop() : raw;
   const disp  = short.length > 36 ? short.slice(0,33)+'…' : short;
 
-  const srvTxt = S.serverUp ? `MLX :${S.serverPort}` : `MLX :${S.serverPort} ✗`;
+  const srvTxt = S.serverUp ? `MLX :${S.serverPort}` :
+    (S.serverState === 'starting' ? `MLX :${S.serverPort} …` : `MLX :${S.serverPort} ✗`);
   const netTxt = S.online ? 'Internet' : 'Offline';
-
-  const pct    = S.ctxMax ? Math.min(S.ctxChars/S.ctxMax, 1) : 0;
-  const ctxPct = Math.round(pct*100);
 
   const srvBtnLabel = S.serverBusy ? '…' : (S.serverUp ? '⏹ ปิด' : '▶ เปิด');
   const srvBtnClass = S.serverUp ? 'srv-btn srv-btn-on' : 'srv-btn srv-btn-off';
 
   let html =
     `<span class="badge">${esc(disp)}</span>` +
-    `<span class="badge">${srvTxt}</span>` +
-    `<button class="${srvBtnClass}" ${S.serverBusy ? 'disabled' : ''} onclick="toggleMlxServer()" title="เปิด/ปิด mlx_vlm.server">${srvBtnLabel}</button>` +
     `<span class="badge">${netTxt}</span>` +
-    `<span class="badge">CTX ${ctxPct}%</span>`;
+    `<span class="badge">${srvTxt}</span>` +
+    `<button class="${srvBtnClass}" ${S.serverBusy ? 'disabled' : ''} onclick="toggleMlxServer()" title="เปิด/ปิด mlx_vlm.server (${esc(S.serverState)})">${srvBtnLabel}</button>`;
 
   if (S.skill)
     html += `<span class="badge" style="font-weight:700">${esc(S.skill)}</span>`;
@@ -1255,6 +1480,7 @@ function pollMlxServerStatus(waitForUp) {
       const res  = await fetch('/server/status');
       const data = await res.json();
       up = !!data.server_up;
+      S.serverState = data.server_state || (up ? 'ready' : 'down');
     } catch (error) {
       // transient fetch failure -- keep polling until the deadline
     }
@@ -1264,6 +1490,7 @@ function pollMlxServerStatus(waitForUp) {
       S.serverPollTimer = null;
       S.serverBusy = false;
       if (up !== null) S.serverUp = up;
+      if (up === true) S.serverState = 'ready';
       updateHeader();
       if (!reached)
         appendSystem(`⚠ MLX server ${waitForUp ? 'ยังไม่ขึ้น' : 'ยังไม่ปิด'}สนิทภายในเวลาที่รอ — ลองเช็คสถานะอีกครั้ง`);
@@ -1276,7 +1503,7 @@ function pollMlxServerStatus(waitForUp) {
 function updateCtx() {
   const pct = S.ctxMax ? Math.min(S.ctxChars/S.ctxMax, 1) : 0;
   const pctI = Math.round(pct*100);
-  const col  = pct > 0.9 ? '#f48771' : pct > 0.7 ? '#dcb67a' : '#4ec9b0';
+  const col  = pct > 0.9 ? 'var(--danger)' : pct > 0.7 ? 'var(--warning)' : 'var(--success)';
   $('ctx-fill').style.width      = (pct*100)+'%';
   $('ctx-fill').style.background = col;
   $('ctx-text').textContent = `CTX ${pctI}%  ${S.ctxChars.toLocaleString()} / ${S.ctxMax.toLocaleString()} chars`;
@@ -1289,6 +1516,7 @@ function updateInput() {
   $('send-btn').style.display = S.busy ? 'none' : '';
   $('stop-btn').style.display = S.busy ? '' : 'none';
   if (S.busy) $('stop-btn').disabled = false;  // re-enable for the new turn
+  renderEffortControls();
 }
 
 function stopTurn() {
@@ -1377,14 +1605,17 @@ function togglePanel(view) {
 
 // ── Panel renderers ────────────────────────────────────────────────────────────
 const PANEL_TITLES = {
-  files: '📁 Workspace', activity: '⚡ Activity',
+  files: '📁 Workspace', rag: '🔎 RAG Search', pdf: '📄 PDF to Text', activity: '⚡ Activity',
   history: '🕐 History', commands: '📋 Commands',
 };
 
 function renderPanel() {
   const v = S.panelView;
   $('panel-title').textContent = PANEL_TITLES[v] || '';
+  if (v !== 'files') $('file-viewer').style.display = 'none';
   if      (v === 'files')    renderFiles();
+  else if (v === 'rag')      renderRag();
+  else if (v === 'pdf')      renderPdfToText();
   else if (v === 'activity') renderActivity();
   else if (v === 'history')  renderHistory();
   else if (v === 'commands') renderCommands();
@@ -1400,7 +1631,7 @@ function renderFiles() {
   let h = '';
   if (cur) {
     const rel = root && cur.startsWith(root) ? (cur.slice(root.length).replace(/^\//,'') || '.') : cur;
-    h += `<div style="font-size:11px;color:#808080;padding:4px 8px 2px">📂 ${esc(rel)}</div>`;
+    h += `<div style="font-size:11px;color:var(--muted);padding:4px 8px 2px">📂 ${esc(rel)}</div>`;
   }
 
   for (const f of dirs)
@@ -1410,7 +1641,7 @@ function renderFiles() {
     const icon = fileIcon(f.name);
     const size = f.size > 1024 ? `  ${Math.floor(f.size/1024)}KB` : '';
     h += `<div class="file-row" data-path="${esc(f.path)}">
-      <button class="file-name" data-action="view" title="${esc(f.path)}">${icon} ${esc(f.name)}${size ? `<span style="color:#808080;font-size:10px"> ${size.trim()}</span>` : ''}</button>
+      <button class="file-name" data-action="view" title="${esc(f.path)}">${icon} ${esc(f.name)}${size ? `<span style="color:var(--muted);font-size:10px"> ${size.trim()}</span>` : ''}</button>
       <div class="file-actions"><button class="file-act-btn" data-action="view" title="ดู">👁</button></div>
     </div>`;
   }
@@ -1421,9 +1652,9 @@ function renderFiles() {
   }
 
   if (!S.files.length)
-    h += `<div style="color:#808080;font-size:12px;padding:8px">_(empty workspace)_</div>`;
+    h += `<div style="color:var(--muted);font-size:12px;padding:8px">_(empty workspace)_</div>`;
   else if (S.filesTruncated)
-    h += `<div style="color:#d7ba7d;font-size:11px;padding:8px">แสดง ${S.filesLimit.toLocaleString()} รายการแรก — ใช้การค้นหาเมื่อต้องการไฟล์ที่เหลือ</div>`;
+    h += `<div style="color:var(--warning);font-size:11px;padding:8px">แสดง ${S.filesLimit.toLocaleString()} รายการแรก — ใช้การค้นหาเมื่อต้องการไฟล์ที่เหลือ</div>`;
 
   body.innerHTML = h;
 
@@ -1448,11 +1679,215 @@ function renderFiles() {
   }
 }
 
+function renderRag() {
+  const body = $('panel-body');
+  const disabled = S.ragBusy ? 'disabled' : '';
+  const statusClass = S.ragError ? 'rag-status error' : 'rag-status';
+  const result = S.ragResult
+    ? `<div class="rag-result">${linkify(esc(S.ragResult))}</div>`
+    : '<div class="rag-result" style="color:var(--muted)">_(ยังไม่มีผลค้น)_</div>';
+  body.innerHTML = `<div class="rag-box">
+    <div class="rag-note">ค้น SQLite FTS5 / OCR โดยตรง — ไม่เรียก LLM และไม่เพิ่ม chat context; แสดงไฟล์ ตำแหน่ง/หน้า และตัวอย่างเนื้อหา</div>
+    <input id="rag-query" class="rag-input" value="${esc(S.ragQuery)}"
+      placeholder="ชื่อไฟล์หรือคำค้น…" ${disabled}
+      oninput="S.ragQuery=this.value"
+      onkeydown="if(event.key==='Enter'){event.preventDefault();ragSearchDirect()}">
+    <div class="rag-actions">
+      <button ${disabled} onclick="ragSearchDirect()">🔎 ค้นหา</button>
+      <button ${disabled} onclick="ragSyncDirect()">↻ sync_kb</button>
+    </div>
+    <div class="${statusClass}">${esc(S.ragStatus)}</div>
+    ${result}
+  </div>`;
+}
+
+async function ragSearchDirect() {
+  const query = String(S.ragQuery || '').trim();
+  if (!query) {
+    S.ragStatus = 'กรุณาใส่คำค้น'; S.ragError = true; renderRag(); return;
+  }
+  S.ragBusy = true; S.ragError = false; S.ragStatus = 'กำลังค้น Knowledge Base…'; renderRag();
+  try {
+    const res = await fetch('/rag/search', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({query}),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    S.ragResult = data.result || '(ไม่พบผลลัพธ์)';
+    S.ragStatus = 'ค้นเสร็จ — deterministic RAG';
+  } catch (err) {
+    S.ragStatus = `ค้นไม่สำเร็จ: ${err.message || err}`; S.ragError = true;
+  } finally {
+    S.ragBusy = false; if (S.panelView === 'rag') renderRag();
+  }
+}
+
+async function ragSyncDirect() {
+  if (S.ragBusy) return;
+  S.ragBusy = true; S.ragError = false; S.ragSyncJobId = '';
+  S.ragStatus = 'กำลังเตรียม /sync_kb โดยไม่ใช้ LLM…'; renderRag();
+  try {
+    const res = await fetch('/rag/sync/start', {method: 'POST'});
+    const data = await res.json();
+    if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    const job = data.job || {};
+    S.ragSyncJobId = job.job_id || '';
+    if (!S.ragSyncJobId) throw new Error('ไม่ได้รับ job id ของ sync');
+    await pollRagSync(S.ragSyncJobId);
+  } catch (err) {
+    S.ragStatus = `sync ไม่สำเร็จ: ${err.message || err}`; S.ragError = true;
+  } finally {
+    S.ragBusy = false; S.ragSyncJobId = ''; if (S.panelView === 'rag') renderRag();
+  }
+}
+
+async function pollRagSync(jobId) {
+  while (true) {
+    const res = await fetch('/rag/sync/status', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({job_id: jobId}),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    const job = data.job || {};
+    S.ragStatus = job.message || 'กำลัง sync Knowledge Base…';
+    if (job.status === 'done') {
+      S.ragResult = job.summary || 'sync_kb เสร็จ';
+      S.ragError = false;
+      return;
+    }
+    if (job.status === 'error') {
+      S.ragResult = job.summary || '';
+      S.ragError = true;
+      throw new Error(job.error || 'sync Knowledge Base ไม่สำเร็จ');
+    }
+    if (S.panelView === 'rag') renderRag();
+    await new Promise(resolve => setTimeout(resolve, 350));
+  }
+}
+
+function renderPdfToText() {
+  const body = $('panel-body');
+  const disabled = S.pdfBusy ? 'disabled' : '';
+  const statusClass = S.pdfError ? 'rag-status error' : 'rag-status';
+  const result = S.pdfResult || null;
+  let resultHtml = '<div class="rag-result" style="color:var(--muted)">_(ยังไม่มีผลแปลง)_</div>';
+  if (result) {
+    const stats = result.stats || {};
+    const outputPath = result.output_path || '';
+    const warnings = Array.isArray(result.warnings) ? result.warnings : [];
+    resultHtml = `<div class="rag-result">
+      <div><strong>${Number(result.total_pages || 0).toLocaleString()} หน้า</strong> ·
+        native ${Number(stats.native || 0).toLocaleString()} ·
+        OCR ${Number(stats.ocr || 0).toLocaleString()} ·
+        table ${Number(stats.tables || 0).toLocaleString()} ·
+        LLM rewrite ${Number(stats.rewritten || 0).toLocaleString()}</div>
+      ${outputPath ? `<div style="margin-top:6px">${linkify(esc(outputPath))}</div>` : ''}
+      ${warnings.length ? `<div style="margin-top:6px;color:var(--warning)">⚠ ${esc(warnings.join(' · '))}</div>` : ''}
+    </div>`;
+  }
+
+  body.innerHTML = `<div class="rag-box">
+    <div class="rag-note">
+      PDF แท้ใช้ text layer โดยตรง; หน้า scan ใช้ Apple Vision OCR และสร้างตารางเมื่อ layout มั่นใจ
+      ทุกหน้าถูกพักใน SQLite แล้วเขียนออกตามเลขหน้าจริงของ PDF พร้อมตัวคั่นหน้า
+      LLM ใช้เฉพาะ cleanup ภาษาไทยจาก OCR เมื่อเปิดตัวเลือกนี้ และรัน no-think หลายหน้าต่อ request
+    </div>
+    <input id="pdf-text-input" class="rag-input" type="file" accept=".pdf,application/pdf" ${disabled}>
+    <label style="display:flex;gap:7px;align-items:flex-start;font-size:11px;color:var(--text);margin:2px 2px 8px">
+      <input id="pdf-rewrite-thai" type="checkbox" ${S.pdfRewriteThai ? 'checked' : ''} ${disabled}
+        onchange="S.pdfRewriteThai=this.checked">
+      <span>เกลาภาษาไทยจาก OCR ด้วย local LLM แบบ no-think
+        (สูงสุด 4 หน้าต่อ request; PDF แท้และตารางไม่เรียก LLM)</span>
+    </label>
+    <div class="rag-actions">
+      <button ${disabled} onclick="pdfToTextStart()">📄 แปลง PDF → Text</button>
+    </div>
+    <div class="${statusClass}">${esc(S.pdfStatus)}</div>
+    ${resultHtml}
+  </div>`;
+}
+
+
+async function pdfToTextStart() {
+  if (S.pdfBusy) return;
+  const input = $('pdf-text-input');
+  const file = input && input.files && input.files[0];
+  if (!file) {
+    S.pdfStatus = 'กรุณาเลือกไฟล์ PDF'; S.pdfError = true; renderPdfToText(); return;
+  }
+  if (!file.name.toLowerCase().endsWith('.pdf')) {
+    S.pdfStatus = 'ไฟล์ที่เลือกต้องเป็น .pdf'; S.pdfError = true; renderPdfToText(); return;
+  }
+
+  const rewriteThai = !!S.pdfRewriteThai;
+  S.pdfBusy = true; S.pdfError = false; S.pdfJobId = ''; S.pdfResult = null;
+  S.pdfStatus = 'กำลังส่ง PDF เข้า pipeline…';
+  renderPdfToText();
+  try {
+    const response = await fetch('/pdf-to-text/start', {
+      method: 'POST',
+      body: file,
+      headers: {
+        'Content-Type': file.type || 'application/pdf',
+        'X-File-Name': encodeURIComponent(file.name),
+        'X-Rewrite-Thai': rewriteThai ? '1' : '0',
+      },
+    });
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    const job = data.job || {};
+    S.pdfJobId = job.job_id || '';
+    if (!S.pdfJobId) throw new Error('ไม่ได้รับ job id ของ PDF to Text');
+    S.pdfStatus = job.message || 'กำลังเตรียม PDF to Text…';
+    if (S.panelView === 'pdf') renderPdfToText();
+    await pollPdfToText(S.pdfJobId);
+  } catch (err) {
+    S.pdfStatus = `PDF to Text ไม่สำเร็จ: ${err.message || err}`;
+    S.pdfError = true;
+  } finally {
+    S.pdfBusy = false;
+    if (S.panelView === 'pdf') renderPdfToText();
+  }
+}
+
+
+async function pollPdfToText(jobId) {
+  while (true) {
+    const response = await fetch('/pdf-to-text/status', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({job_id: jobId}),
+    });
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    const job = data.job || {};
+    S.pdfStatus = job.message || 'กำลังแปลง PDF เป็นข้อความ…';
+    if (job.status === 'done') {
+      S.pdfResult = {
+        total_pages: job.total_pages || 0,
+        output_path: job.output_path || '',
+        stats: job.stats || {},
+        warnings: job.warnings || [],
+      };
+      S.pdfError = false;
+      return;
+    }
+    if (job.status === 'error') {
+      throw new Error(job.error || 'PDF to Text ไม่สำเร็จ');
+    }
+    if (S.panelView === 'pdf') renderPdfToText();
+    await new Promise(resolve => setTimeout(resolve, 350));
+  }
+}
+
+
 function renderActivity() {
   const body = $('panel-body');
   const acts = S.activity.slice(-100);
   if (!acts.length) {
-    body.innerHTML = '<div style="color:#808080;font-size:12px;padding:8px">_(no activity yet)_</div>';
+    body.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:8px">_(no activity yet)_</div>';
     return;
   }
   let h = '';
@@ -1505,15 +1940,15 @@ function liveActivitySummary(task) {
 function renderHistory() {
   const body = $('panel-body');
   if (S.histLoading) {
-    body.innerHTML = '<div style="color:#808080;font-size:12px;padding:8px">กำลังโหลด…</div>';
+    body.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:8px">กำลังโหลด…</div>';
     return;
   }
   const pairs = S.histPairs || [];
   if (!pairs.length) {
-    body.innerHTML = '<div style="color:#808080;font-size:12px;padding:8px">_(ยังไม่มีประวัติ)_</div>';
+    body.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:8px">_(ยังไม่มีประวัติ)_</div>';
     return;
   }
-  let h = `<div style="font-size:11px;color:#808080;padding:4px 8px">${S.histTotal.toLocaleString()} รายการ</div>`;
+  let h = `<div style="font-size:11px;color:var(--muted);padding:4px 8px">${S.histTotal.toLocaleString()} รายการ</div>`;
   for (let i = pairs.length-1; i >= 0; i--) {
     const p = pairs[i];
     const q = p.q || ''; const a = p.a || '—';
@@ -1525,7 +1960,7 @@ function renderHistory() {
       <div class="hist-body">
         <div class="hist-lbl">คำถาม</div>
         <div class="hist-txt">${esc(q)}</div>
-        <hr style="border:none;border-top:1px solid #3c3c3c;margin:6px 0">
+        <hr style="border:none;border-top:1px solid var(--border);margin:6px 0">
         <div class="hist-lbl">คำตอบ</div>
         <div class="hist-txt">${renderMarkdown(a)}</div>
       </div>
@@ -1542,7 +1977,7 @@ function renderCommands() {
   for (const entry of S.builtinCmds) {
     const name = entry.name || '';
     if (name === 'exit' && !activeSkill) continue;
-    if (!['clear','compact','history','exit'].includes(name)) continue;
+    if (!['clear','compact','history','index','sync_kb','exit'].includes(name)) continue;
     const cmd  = `/${name}`;
     const icon = FN_ICONS[name] || '⚙';
     h += `<button class="p-btn" ${busy?'disabled':''} title="${esc(entry.desc||'')}" onclick="runCmd('${cmd}')">${icon} ${cmd}</button>`;
@@ -1553,10 +1988,10 @@ function renderCommands() {
       const sname = entry.name || '';
       const cmd   = `/${sname}`;
       const isAct = activeSkill === sname;
-      h += `<button class="p-btn" ${busy?'disabled':''} title="${esc(entry.desc||'')}" onclick="runCmd('${cmd}')" style="${isAct?'color:#4ec9b0':''}">${isAct?'● ':''}${cmd}</button>`;
+      h += `<button class="p-btn" ${busy?'disabled':''} title="${esc(entry.desc||'')}" onclick="runCmd('${cmd}')" style="${isAct?'color:var(--success)':''}">${isAct?'● ':''}${cmd}</button>`;
     }
   } else {
-    h += `<div style="color:#808080;font-size:12px;padding:6px 8px">_(ยังไม่มี skills)_</div>`;
+    h += `<div style="color:var(--muted);font-size:12px;padding:6px 8px">_(ยังไม่มี skills)_</div>`;
   }
   body.innerHTML = h;
 }
@@ -1583,7 +2018,7 @@ function deleteFile(path, btnEl) {
       clearTimeout(_delPending.timer);
       if (_delPending.el) { _delPending.el.textContent = '🗑'; _delPending.el.style.background = ''; _delPending.el.style.color = ''; }
     }
-    if (btnEl) { btnEl.textContent = '?'; btnEl.style.background = '#5f1f1f'; btnEl.style.color = '#f48771'; }
+    if (btnEl) { btnEl.textContent = '?'; btnEl.style.background = 'var(--danger-bg)'; btnEl.style.color = 'var(--danger)'; }
     _delPending = {
       path, el: btnEl,
       timer: setTimeout(() => {
@@ -1596,7 +2031,10 @@ function deleteFile(path, btnEl) {
   }
 }
 
-const CMD_SPINNER_LABELS = {'/history':'โหลด history…', '/index':'กำลังสร้าง RAG index…', '/clear':'กำลัง clear…'};
+const CMD_SPINNER_LABELS = {
+  '/history':'โหลด history…', '/index':'กำลังสร้าง RAG index…',
+  '/sync_kb':'กำลัง sync Knowledge Base…', '/clear':'กำลัง clear…'
+};
 
 function runCmd(cmd) {
   appendUser(cmd);
@@ -1631,6 +2069,7 @@ function doSend() {
       : '';
     setAttachment(null);
     send({type:'query', content: text ? `${text}\n\n${hint}` : hint,
+      effort: S.effort,
       attachment: attachment ? {path: attachment.path, isImage: attachment.isImage} : null});
   }
 }

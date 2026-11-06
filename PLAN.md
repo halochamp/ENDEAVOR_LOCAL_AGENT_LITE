@@ -20,7 +20,7 @@ user-profile learning — ทั้งหมดนี้**ตัดทิ้ง*
 |---|---|---|
 | โมเดล | `mlx-community/Qwen3.5-2B-OptiQ-4bit` (โหลดไว้แล้ว 2.1GB บนดิสก์) | ทดสอบผ่านแล้ว: tool-call format ถูก 100%, gen ~38 tok/s, peak RAM ~2.3-2.9GB |
 | Runtime | **In-process on-demand** — `mlx_vlm.load()` ในตัว agent เอง ไม่มี server แยก | ปิดโปรแกรม = RAM คืนหมด; cold start ~5-10s ยอมรับได้ |
-| RAG | **SQLite FTS5** (lexical) — ไม่ใช้ MiniLM/ChromaDB | index อยู่บน SSD, RAM ใกล้ศูนย์; ต่างจาก MAX_VLM ที่พึ่ง ENDEAVOR_RAG_MAX |
+| RAG | **SQLite FTS5 + optional semantic vector** — implementation in `MCP-RagDoc/`; MiniLM ONNX INT8 ARM64, no ChromaDB | FTS/OCR/file fallback remains the always-available low-RAM path; semantic runs in a short-lived subprocess, stores normalized float16 vectors in SQLite, uses generation/ready state plus streaming sync, fingerprints the actual HF snapshot, uses 112-token children with 24-token whole-word-aware overlap and word-safe long-query truncation, then fuses streaming exact cosine + lexical ranks with RRF. `MCP-RagDoc/rag_eval.py` supplies Recall@1/3/8 + MRR before tuning. HNSW is intentionally deferred until corpus-size/latency measurements justify its extra RAM. |
 | Orchestration | **ReAct loop เขียนใหม่** (~200-300 บรรทัด) — ไม่ copy graph.py (86KB, tuned เพื่อ 35B) | โมเดลเล็กต้องการ guardrail ระดับ code ไม่ใช่ routing ซับซ้อน |
 | UI | **CLI** เท่านั้น | RAM น้อยสุด |
 
@@ -63,7 +63,7 @@ ENDEAVOR_AGENT_LITE/
 │   ├── write_file.py        # copy เกือบตรง (ต้นฉบับ 3.7KB เล็กอยู่แล้ว)
 │   ├── web_search.py        # trim จาก MAX_VLM: ddgs + extractive summary + บังคับแนบ URL
 │   ├── rag_search.py        # เขียนใหม่: query FTS5 → path + snippet (แทน rag_tool.py 35KB)
-│   └── read_image.py        # trim: Apple Vision OCR + ส่งภาพเข้า context ของ VLM โดยตรง
+│   └── read_image.py        # progressive direct vision + Apple Vision OCR; batch สูงสุด 4 ภาพ
 ├── indexer.py               # สร้าง/อัพเดต FTS5 index (รันแยก ไม่ใช่ตอน chat)
 ├── data/                    # SSD state: file_index.sqlite3, web_cache.sqlite3
 ├── logs/                    # session logs (jsonl)
@@ -83,7 +83,7 @@ ENDEAVOR_AGENT_LITE/
 | `write_file` | `tools/write_file.py` (3.7KB) | **Copy เกือบตรง** — เพิ่ม guard: เขียนได้เฉพาะใต้ workspace/ กับ path ที่ user สั่งชัดเจน |
 | `web_search` | `tools/web_search.py` (18KB) + `web_cache.py` + `_summarize.py` | **Copy + trim**: คง ddgs multi-engine + cache + extractive summary (ไม่ใช้ LLM สรุป — เร็ว + ไม่กิน RAM เพิ่ม) **ทุกผลลัพธ์ต้องมี `[source: URL]` ต่อท้ายเสมอ** ตาม requirement |
 | `rag_search` | แนวคิดจาก `rag_tool.py` แต่ **เขียนใหม่** | SQLite FTS5: ตาราง `files(path, name, mtime, content)` + trigram/porter tokenizer. Query ครั้งเดียวได้ทั้ง match จากชื่อไฟล์และเนื้อหา คืน path + snippet |
-| `read_image` | `tools/read_image.py` | **Lite port จาก MAX_VLM**: Apple Vision OCR + bounding boxes, EXIF-upright, HEIC/HEIF conversion ผ่าน macOS `sips`, named crop/zoom, long-image tiling, conservative table reconstruction และ QR decode; ทุกภาพที่ส่ง VLM ถูก resize ≤1024px/ด้านและ snapshot ส่วนตัวใน `workspect/.lite_state` ก่อนส่งเข้า mlx_vlm context. ไม่เพิ่ม separate VLM/URL-download pipeline ของ MAX เพราะ Lite ใช้โมเดล VLM เดียวและไม่ต้องขยาย network surface |
+| `read_image` | `tools/read_image.py` | **Lite-compatible fork จาก MAX_VLM (2026-09-09)**: progressive overview-first; original pixels อยู่ใน context ตลอด outer ReAct turn; follow-up `detail=text/chart/slide`, `find`, named region+zoom; Apple Vision OCR + bounding boxes, conservative table reconstruction, QR, EXIF/HEIC และ structural crops. Batch จำกัด **1–4 ภาพ** ตาม user decision และเลือก OCR เป็นรายภาพได้ (`ocr=true` หรือ `[1,3]`) โดย source-local work ทำพร้อมกันสูงสุด 4 workers. Lite ยังคง local absolute path only, hidden OCR/QR DLP preflight และภาพ ≤1024px/ด้าน; ไม่รับ URL/screen source expansion ของ MAX_VLM. |
 
 ## 6. Helper functions สำหรับโมเดลเล็ก (บทเรียนจากการทดสอบจริง 2026-07-23)
 
@@ -130,7 +130,7 @@ max 6 tool-steps ต่อ turn (MAX ใช้ RECURSION_LIMIT=60 — 2B ไม�
 ### Phase 3 — Indexer + rag_search (FTS5)
 1. `indexer.py`: เดินไฟล์ใต้ roots ที่กำหนดใน config → FTS5
    - ไม่จำกัดขนาดไฟล์: text เก็บเฉพาะต้นไฟล์ 250 ตัวอักษร; PDF/Office เก็บชื่อ/path/type/size/mtime เท่านั้น ไม่เก็บเนื้อหา; incremental ด้วย mtime
-2. `tools/rag_search.py`: query → `[{path, name-match/content-match, snippet}]`
+2. `MCP-RagDoc/rag_search.py` (with `tools/rag_search.py` compatibility shim): query → `[{path, name-match/content-match, snippet}]`
 3. ✅ Verify: index โฟลเดอร์ทดสอบ → หาไฟล์เจอทั้งจากชื่อ (ไทย/อังกฤษ) และจากเนื้อหา; วัดเวลา query < 1s; RAM ระหว่าง index < 500MB
 
 ### Phase 4 — web_search + read_image
@@ -268,7 +268,15 @@ Threshold ตัดสินใจ: นับ token ของ prompt จริ�
 - `helpers/turn_guard.py` (ใหม่) — ย้าย RepeatCallGuard/MAX_CALLS_PER_TOOL quota เข้าไปเป็น
   shared per-turn state ที่ **แต่ละ tool wrapper เช็คเอง** ก่อนรัน `run()` จริง (แทนที่จะ intercept
   ที่ graph level ผ่าน `pre_model_hook`/`post_model_hook` ซึ่งพบว่าเปราะกว่า เพราะต้องไปแก้ไข
-  `AIMessage.tool_calls` แข่งกับ routing logic ภายในของ LangGraph เอง)
+  `AIMessage.tool_calls` แข่งกับ routing logic ภายในของ LangGraph เอง). ปัจจุบัน default
+  `MAX_TOOL_STEPS=10` และ `MAX_CALLS_PER_TOOL=10`: command/query ที่เปลี่ยนจริงใช้ tool เดิมต่อได้
+  สูงสุด 10 ครั้งต่อ turn แต่ exact consecutive bash/web_search call ครั้งที่ 2 ถูก wrapper ตอบ
+  error+hint กลับเข้า model และครั้งที่ 3 exact same จึงถูก outer guard hard-stop.
+- Runtime bash hints ไม่ hard-code machine/user: process start อ่าน account/home จากระบบจริง,
+  ตรวจ macOS/BSD + architecture และ inject Home/Desktop/Project ที่ resolve จริงใน system prompt.
+  Bash failure ทุกครั้งคืนสาเหตุที่ตรวจได้ (`blocked syntax`, missing path, command/permission,
+  sandbox, timeout หรือ exit status) พร้อม runtime path hint ตั้งแต่ error แรก; redirect เช่น
+  `2>/dev/null` ถูกบล็อกเพื่อไม่ซ่อน stderr ที่ model ต้องใช้แก้ command.
 - `prompts.py` — ตัดตัวอย่าง `<tool_call><function=...>` XML ทิ้งทั้งหมด (เป็น mechanism ของ
   ReAct loop มือเขียนเดิม ไม่เกี่ยวกับ structured tool-calling ของ server แล้ว — ทิ้งไว้กลับ
   confuse โมเดลเรื่อง routing) เปลี่ยนเป็นตัวอย่างแบบ natural-language ล้วน
@@ -309,7 +317,7 @@ python ui_cli.py
 ```
 
 **บั๊กที่เจอ+แก้ระหว่าง smoke test สุดท้าย (2026-07-23):**
-- `tools/rag_search.py` — ค้นหาชื่อไฟล์ตรงตัว (เช่น "PLAN.md") ไม่เจอไฟล์นั้นเองอยู่ใน top results
+- `MCP-RagDoc/rag_search.py` — ค้นหาชื่อไฟล์ตรงตัว (เช่น "PLAN.md") ไม่เจอไฟล์นั้นเองอยู่ใน top results
   เพราะ `bm25()` บน trigram-tokenized `name` column ให้ค่าที่ขัดสามัญสำนึก (ลองปรับ column weight
   หลายแบบแล้วไม่ช่วย) — แก้ด้วยการ rank ผลลัพธ์จาก `name MATCH` เองใน Python (exact match > substring
   > ชื่อสั้นกว่า) แทนที่จะเชื่อ `bm25()` score บน field สั้นๆ แบบนี้
@@ -785,3 +793,115 @@ was more exact in Bash arguments but was not dramatically smarter for simple
 routing. Production keeps think-256 because multi-step tool interpretation is
 the harder workload. The web candidate rejector intentionally uses no-think
 because its output contract is only indexed YES/NO decisions.
+
+## Phase 11 — Knowledge Base sync boundary (implemented, 2026-09-08)
+
+Agent Lite's local RAG scope is now the repository's `rag_document/` tree,
+with its standalone code collected under the root-level `MCP-RagDoc/`:
+
+- Supported text/PDF/Office/image source documents live in `rag_document/` or
+  its visible nested folders. `MCP-RagDoc/rag_sync.py` hashes each source, streams normalized
+  text or OCR into overlapping ~3,000-character chunks, and stores those chunks
+  directly in SQLite FTS5. Hidden, symlinked, and sensitive paths are excluded,
+  and normal sync no longer materializes a full generated Markdown body.
+- `kb_documents` stores source metadata/hash and `kb_chunks_fts` stores
+  searchable chunks plus page/unit location. Each changed document is one
+  transaction: ordinary extraction failure rolls back to the last good snapshot;
+  credential-shaped content fails closed and removes the searchable snapshot.
+- PDF is page-streamed and OCRs only pages without embedded text; images use
+  Apple Vision OCR. DOCX uses bounded ZIP/XML streaming, XLSX read-only row
+  iteration, and chunk overlap preserves matches across chunk boundaries.
+- Thai OCR repair is deliberately non-lexical. Deterministic Unicode/layout
+  errors such as `นำ้ -> น้ำ` are repaired, but valid alternatives such as
+  `น้า` are never silently changed to `น้ำ`. Apple Vision exposes confidence
+  plus up to three candidates. Search keeps candidate 2 even at high confidence
+  (important for short Thai words where one edit destroys the only trigram) and
+  adds candidate 3 only below the confidence threshold; alternatives live only
+  in indexed `search_text`, while user-visible `content` remains the primary
+  OCR text after deterministic normalization.
+- Thai word boundaries follow the same proven policy as RAG MAX:
+  lazy PyThaiNLP `word_tokenize(..., engine="newmm")`. Thai KB chunks pack
+  whole words up to the configured character cap, and overlap retains only
+  complete trailing words; if one word is larger than the entire chunk cap it
+  alone falls back to a hard character split. Thai/mixed queries are segmented
+  with the same `newmm` path before building the FTS expression. PyThaiNLP is
+  optional at import time so a missing package falls back to the previous
+  character/trigram behavior instead of preventing Agent Lite from starting.
+- If normal FTS has zero hits, PDF/Image search may use a bounded
+  trigram-anchored edit-distance fallback. It checks at most a small candidate
+  set, accepts only one edit for short Thai terms or two for longer terms, and
+  labels returned results `OCR fuzzy`; it never scans the full KB in Python.
+- RAG is also exposed through a fixed local FastMCP stdio server (`lite-rag`).
+  The 2B agent no longer binds native `rag_search`; it calls the MCP client
+  (`mcp_call_tool`) through a compact 3-tool surface: `rag_search`, action-based
+  `rag_manage`, and `rag_status`. `rag_manage(action="sync")` starts a persistent
+  background job and returns a `job_id`; callers poll `rag_status(view="job")`
+  for file/semantic progress and may use `rag_manage(action="cancel")` for
+  cooperative cancellation without exposing partial semantic generations.
+  `rag_status(view="health")` reports readiness. The standalone MCP server contains
+  no LLM; Lite's direct UI/CLI utilities retain `/sync_kb` and a blocking adapter
+  to the same deterministic core.
+- The browser UI supports persistent `dark` and `light` themes. Dark remains
+  the default for existing behavior; the icon-bar theme toggle stores the
+  selected palette in browser `localStorage`, so no server/model state is
+  involved. Both themes share CSS variables across chat, side panels, RAG,
+  file viewer, markdown/code, inputs, status badges, and scrollbars.
+- `/sync_kb` is available in the CLI and browser UI. The browser also has a
+  dedicated `RAG Search` side tab whose `POST /rag/search` and `POST /rag/sync`
+  endpoints call `rag_mcp_service` directly: search/sync do not enter
+  `agent.run_turn`, do not require the model server, and do not add chat
+  history/context. Sync is serialized by the same heavy-work gate used by chat
+  and index operations. The existing `/index` command remains a legacy
+  Markdown-index rebuild for compatibility; it does not replace `/sync_kb`
+  when raw content changed.
+- The indexer's stale pass removes rows outside the roots used by the current
+  build, preventing an older whole-machine database from leaking into RAG.
+- `web_search` accepts one query or up to four focused queries in one call.
+  Multi-query search runs concurrently, then one batched non-thinking YES/NO
+  semantic gate classifies the code-filtered candidates. Only approved URLs are
+  fetched, with direct-IP pinning plus Host/SNI verification and redirect
+  revalidation to preserve SSRF/DNS-rebinding safety. HTTP fetches run in
+  parallel, while trafilatura/lxml extraction is serialized for macOS runtime
+  safety. Fetched text is reduced to short query-matching passages; the search
+  snippet remains the deterministic fallback when fetch/extraction has no useful
+  matching body text. Total fetched sources remain capped at four.
+- `read_file` accepts `paths=[...]` and reads up to four files concurrently;
+  the single `path=` form remains supported. For independent per-file reads,
+  `requests=[...]` accepts up to four objects, each with its own `contains`
+  filter or `start_line`/`end_line` range plus bounded `context_lines`.
+  `contains` is case-insensitive, scans the complete source before returning
+  bounded context, and preserves the full-file secret scan/fail-closed policy.
+- Repeated identical Bash commands and web-search queries are blocked with a
+  hint to change the command/query. The agent prompt and fallback tool hints
+  carry the same rule, and the agent no longer injects a whole-machine
+  Spotlight pass after RAG.
+
+## Phase 12 — Direct PDF to Text panel (implemented, 2026-09-09)
+
+The browser now has a dedicated `PDF to Text` side tab that bypasses
+`agent.run_turn` and chat history. Conversion is deterministic-first and
+page-streamed through a separate local SQLite staging/cache database:
+
+- each physical PDF page is stored with its 1-based page number and source kind,
+  then the final `.txt` is streamed in `ORDER BY page_number` with explicit
+  `===== PDF PAGE n/total =====` separators;
+- born-digital pages use the embedded text layer. Empty pages use Apple Vision
+  OCR; sparse native pages are OCR-checked once so a tiny native footer cannot
+  hide a scanned body;
+- OCR boxes reuse the current MAX_VLM-style conservative grid reconstruction.
+  Confident tables are emitted as Markdown tables and never sent through an LLM;
+- OCR rasterization is capped at 20M pixels per page and automatically scales
+  down oversized pages, keeping the 8 GB target bounded;
+- optional Thai cleanup selects only non-table OCR pages containing Thai. It
+  sends up to four pages in one local `/chat/completions` request with
+  `enable_thinking=false` and `thinking_budget=0`; native pages, English-only
+  OCR, and reconstructed tables use zero LLM calls;
+- cleanup is fail-closed: exact page IDs must round-trip, output length must stay
+  bounded, character similarity must remain at least 72%, and every numeric
+  token from the OCR source must survive. A failed/invalid batch keeps the raw
+  OCR text and records a warning instead of blocking conversion;
+- the selected PDF is streamed into private per-machine runtime state and
+  deleted after the job. The user-facing collision-safe `.txt` is written only
+  under `workspect/`; old SQLite staging rows/private source snapshots expire.
+  PDF work shares the same heavy-work lock as chat/index/RAG sync to avoid peak
+  RAM overlap on the small-machine target.

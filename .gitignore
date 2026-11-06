@@ -9,6 +9,7 @@ htmlcov/
 
 # Built locally from helpers/_vision_ocr.swift by the installer and CI
 helpers/vision_ocr_macos
+MCP-RagDoc/helpers/vision_ocr_macos
 
 # Local configuration and runtime state
 .env
@@ -16,6 +17,8 @@ data/
 logs/
 workspect/*
 !workspect/.gitkeep
+rag_document/*
+!rag_document/.gitkeep
 
 # OS/editor files
 .DS_Store

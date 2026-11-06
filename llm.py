@@ -1,6 +1,3 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
 """llm.py — ChatOpenAI factory pointed at mlx_vlm.server.
 
 Copied-and-trimmed from ENDEAVOR_LOCAL_AGENT_MAX_VLM/llm.py (2026-07-23,

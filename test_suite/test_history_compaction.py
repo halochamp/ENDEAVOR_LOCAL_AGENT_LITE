@@ -1,6 +1,3 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
 """No model needed — unit tests for agent.py's cross-turn history compaction.
 
 Updated 2026-07-23 for the architecture switch to create_react_agent
@@ -97,12 +94,13 @@ def test_turn_guard_check_allows_first_call():
     assert turn_guard.check("bash", {"command": "ls"}) is None
 
 
-def test_turn_guard_check_blocks_on_quota():
+def test_turn_guard_check_blocks_on_configured_quota():
     turn_guard.reset()
-    for _ in range(3):
-        assert turn_guard.check("bash", {"command": f"echo {_}"}) is None
-        turn_guard.record("bash", {"command": f"echo {_}"}, "ok")
-    blocked = turn_guard.check("bash", {"command": "echo 4"})
+    for index in range(config.MAX_CALLS_PER_TOOL):
+        args = {"command": f"echo {index}"}
+        assert turn_guard.check("bash", args) is None
+        turn_guard.record("bash", args, "ok")
+    blocked = turn_guard.check("bash", {"command": "echo over-quota"})
     assert blocked is not None and "โควตา" in blocked
 
 
@@ -152,6 +150,19 @@ def test_turn_guard_reserves_quota_before_parallel_tool_execution(monkeypatch):
     for arg in args[:2]:
         turn_guard.record("web_search", arg, "ok")
     assert turn_guard.tool_call_count() == 2
+
+
+def test_turn_guard_applies_smaller_web_retry_budget(monkeypatch):
+    monkeypatch.setattr(config, "MAX_CALLS_PER_TOOL", 10)
+    monkeypatch.setattr(config, "MAX_WEB_CALLS_PER_TURN", 2)
+    turn_guard.reset()
+    for index in range(2):
+        args = {"query": f"different-{index}"}
+        assert turn_guard.check("web_search", args) is None
+        turn_guard.record("web_search", args, "ok")
+    blocked = turn_guard.check("web_search", {"query": "different-3"})
+    assert blocked.startswith("[error]")
+    assert "2 ครั้ง" in blocked
 
 
 if __name__ == "__main__":

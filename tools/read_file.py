@@ -1,6 +1,3 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
 """Lean read_file for text plus PDF and Office documents.
 
 Extraction is read-only and its output is capped at 5,000 characters. Larger
@@ -18,11 +15,14 @@ line-range request and for sources already small enough to materialize
 directly).
 """
 from __future__ import annotations
+from collections import deque
 from collections.abc import Callable, Iterator
 import hashlib
 import heapq
+import json
 import random
 import re
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import config
@@ -41,27 +41,51 @@ SCHEMA = {
     "type": "function",
     "function": {
         "name": "read_file",
-        # See tools/bash.py's 2026-07-23 note — reverted alongside it (B was
-        # applied to all 6 tools at once; only bash/rag_search's regression
-        # was isolated, but reverting all of them together is the safer call
-        # given B's total RAM benefit was modest next to approach A/D).
         "description": (
-            "Read a text/markdown/code/PDF/Word (.doc/.docx)/Excel/PowerPoint file from disk, given its full path. "
-            "Returns at most 5,000 characters; larger content is sampled across the file."
+            "Read up to four text/markdown/PDF/Office files concurrently from their full paths. "
+            "Use paths=[...] when files share options, or requests=[{path, contains/start_line/end_line, ...}] "
+            "for independent per-file filters/ranges. contains is case-insensitive and searches the full file. "
+            "Each file returns at most 5,000 characters."
         ),
         "parameters": {
             "type": "object",
             "properties": {
+                "requests": {
+                    "type": "array",
+                    "maxItems": 4,
+                    "description": "Up to four independently configured file reads; do not mix with path/paths/top-level options",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "path": {"type": "string"},
+                            "start_line": {"type": "string"},
+                            "end_line": {"type": "string"},
+                            "contains": {"type": "string", "maxLength": 512, "description": "Case-insensitive substring filter over the full file"},
+                            "context_lines": {"type": "integer", "minimum": 0, "maximum": 20},
+                        },
+                        "required": ["path"],
+                    },
+                },
+                "paths": {
+                    "type": "array", "items": {"type": "string"},
+                    "maxItems": 4,
+                    "description": "Up to four absolute file paths to read concurrently with shared options",
+                },
                 "path": {"type": "string", "description": "Absolute or ~-relative path to the file"},
                 "start_line": {"type": "string", "description": "Optional: 1-indexed first line to read"},
                 "end_line": {"type": "string", "description": "Optional: 1-indexed last line to read"},
+                "contains": {"type": "string", "maxLength": 512, "description": "Optional case-insensitive substring filter over the full file"},
+                "context_lines": {"type": "integer", "minimum": 0, "maximum": 20, "description": "Context lines around each contains match; default 3"},
             },
-            "required": ["path"],
+            "required": [],
         },
     },
 }
 
 _BINARY_MARKER = b"\x00"
+_MAX_CONTAINS_CHARS = 512
+_FILTER_LINE_MAX_CHARS = 900
 _BLOCKED_SECRET = "[blocked] เนื้อหามีข้อมูลที่มีรูปแบบคล้าย credential, token หรือ private key"
 
 
@@ -288,6 +312,113 @@ def _document_lines(path: Path) -> Iterator[str]:
         yield from unit.splitlines()
 
 
+
+def _read_streamed_contains(
+    path: Path,
+    contains: str,
+    context_lines: object,
+    line_factory: Callable[[], Iterator[str]],
+) -> str:
+    """Search the complete source while keeping the returned text bounded.
+
+    Pass 1 scans every line for secret-shaped content and counts all matches.
+    Pass 2 renders only matching lines plus bounded context, so a match near
+    the end of a large file cannot be lost because the normal read path samples.
+    """
+    needle = str(contains or "").strip()
+    if not needle:
+        return "[error] contains ต้องไม่เป็นข้อความว่าง"
+    if len(needle) > _MAX_CONTAINS_CHARS:
+        return f"[error] contains ยาวเกิน {_MAX_CONTAINS_CHARS} ตัวอักษร"
+    try:
+        context = int(context_lines if context_lines not in (None, "") else 3)
+    except (TypeError, ValueError):
+        return "[error] context_lines ต้องเป็นตัวเลข"
+    if not 0 <= context <= 20:
+        return "[error] context_lines ต้องอยู่ระหว่าง 0-20"
+
+    folded = needle.casefold()
+    scanner = StreamingSecretScanner()
+    total_lines = 0
+    match_count = 0
+    for line_no, line in enumerate(line_factory(), 1):
+        total_lines = line_no
+        scanner.feed(line + "\n")
+        if folded in line.casefold():
+            match_count += 1
+    if scanner.found:
+        return _BLOCKED_SECRET
+
+    header = f"[contains={needle!r}: {match_count} matches in {total_lines} lines]\n"
+    if match_count == 0:
+        return header + "[ไม่พบข้อความที่ตรง]"
+
+    trunc_note = f"\n...[truncated — {match_count} matches total; narrow contains or context_lines]"
+    body_budget = max(0, config.READ_FILE_MAX_CHARS - len(header))
+    reserve = len(trunc_note)
+    rendered: list[str] = []
+    used = 0
+    before: deque[tuple[int, str]] = deque(maxlen=context)
+    last_emitted = 0
+    emit_until = 0
+    truncated = False
+
+    def excerpt(text: str, *, is_hit: bool) -> str:
+        if len(text) <= _FILTER_LINE_MAX_CHARS:
+            return text
+        if not is_hit:
+            return text[:_FILTER_LINE_MAX_CHARS - 1] + "…"
+        position = text.casefold().find(folded)
+        if position < 0:
+            return text[:_FILTER_LINE_MAX_CHARS - 1] + "…"
+        room = _FILTER_LINE_MAX_CHARS - 2
+        left = max(0, position - room // 3)
+        right = min(len(text), left + room)
+        left = max(0, right - room)
+        body = text[left:right]
+        return ("…" if left else "") + body + ("…" if right < len(text) else "")
+
+    def append_line(line_no: int, text: str) -> bool:
+        nonlocal used, last_emitted, truncated
+        if line_no <= last_emitted:
+            return True
+        entry = f"{line_no}: {excerpt(text, is_hit=folded in text.casefold())}"
+        extra = len(entry) + (1 if rendered else 0)
+        if used + extra > max(0, body_budget - reserve):
+            truncated = True
+            return False
+        rendered.append(entry)
+        used += extra
+        last_emitted = line_no
+        return True
+
+    for line_no, line in enumerate(line_factory(), 1):
+        hit = folded in line.casefold()
+        if hit:
+            start = max(1, line_no - context)
+            if rendered and start > last_emitted + 1:
+                extra = 3 if rendered else 2
+                if used + extra <= max(0, body_budget - reserve):
+                    rendered.append("--")
+                    used += extra
+                else:
+                    truncated = True
+                    break
+            for previous_no, previous_text in before:
+                if previous_no >= start and not append_line(previous_no, previous_text):
+                    break
+            if truncated:
+                break
+            emit_until = max(emit_until, line_no + context)
+        if hit or line_no <= emit_until:
+            if not append_line(line_no, line):
+                break
+        before.append((line_no, line))
+
+    body = "\n".join(rendered)
+    return header + body + (trunc_note if truncated else "")
+
+
 # ---------------------------------------------------------------------------
 # Streaming (bounded-RAM) document path -- PLAN.md §9.1
 # ---------------------------------------------------------------------------
@@ -443,8 +574,8 @@ def _read_document(path: Path) -> str:
     return _sample_office_document(path, total_chars, unit_count, sep)
 
 
-def run(args: dict[str, str]) -> str:
-    raw_path = (args.get("path") or "").strip()
+def _run_one(args: dict) -> str:
+    raw_path = str(args.get("path") or "").strip()
     if not raw_path:
         return "[error] path is required"
 
@@ -464,14 +595,22 @@ def run(args: dict[str, str]) -> str:
         names = heapq.nsmallest(30, (p.name for p in path.iterdir()))
         return f"[error] '{path}' เป็นโฟลเดอร์ ไม่ใช่ไฟล์ รายการข้างใน: {', '.join(names)}"
 
-    start_line = args.get("start_line")
-    end_line = args.get("end_line")
+    start_line = str(args.get("start_line") or "")
+    end_line = str(args.get("end_line") or "")
+    contains = str(args.get("contains") or "").strip()
+    context_lines = args.get("context_lines", 3)
+    if contains and (start_line or end_line):
+        return "[error] contains ใช้ร่วมกับ start_line/end_line ไม่ได้ — เลือก filter หรือ line range อย่างใดอย่างหนึ่ง"
 
     try:
         if is_supported_document(path):
+            if contains:
+                return _read_streamed_contains(
+                    path, contains, context_lines, lambda: _document_lines(path)
+                )
             if start_line or end_line:
                 return _read_streamed_line_range(
-                    path, start_line or "", end_line or "", lambda: _document_lines(path)
+                    path, start_line, end_line, lambda: _document_lines(path)
                 )
             return _read_document(path)
 
@@ -479,9 +618,13 @@ def run(args: dict[str, str]) -> str:
             sample = f.read(4096)
         if _looks_binary(sample):
             return f"[error] '{path}' ดูเหมือนเป็นไฟล์ binary ที่ไม่รองรับใน read_file"
+        if contains:
+            return _read_streamed_contains(
+                path, contains, context_lines, lambda: _plain_text_lines(path)
+            )
         if start_line or end_line:
             return _read_streamed_line_range(
-                path, start_line or "", end_line or "", lambda: _plain_text_lines(path)
+                path, start_line, end_line, lambda: _plain_text_lines(path)
             )
         total_chars, unit_count, secret_found = _scan_plain_text(path)
         if secret_found:
@@ -494,25 +637,177 @@ def run(args: dict[str, str]) -> str:
         return f"[error] อ่านไฟล์ไม่ได้: {e}"
 
 
+def _coerce_paths(args: dict) -> list[str]:
+    raw_paths = args.get("paths")
+    if raw_paths is None or raw_paths == "":
+        raw_paths = args.get("path")
+    if isinstance(raw_paths, str):
+        value = raw_paths.strip()
+        if value.startswith("["):
+            try:
+                decoded = json.loads(value)
+            except (TypeError, ValueError):
+                decoded = None
+            if isinstance(decoded, list):
+                raw_paths = decoded
+            else:
+                raw_paths = [raw_paths]
+        else:
+            raw_paths = [raw_paths]
+    if not isinstance(raw_paths, (list, tuple)):
+        return []
+    return [item.strip() for item in raw_paths if isinstance(item, str) and item.strip()]
+
+
+_REQUEST_FIELDS = frozenset({"path", "start_line", "end_line", "contains", "context_lines"})
+
+
+def _coerce_requests(args: dict) -> tuple[list[dict] | None, str | None]:
+    raw = args.get("requests")
+    if raw in (None, ""):
+        return None, None
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            return None, "[error] requests ต้องเป็น JSON array ของ object"
+    if not isinstance(raw, (list, tuple)):
+        return None, "[error] requests ต้องเป็น array"
+    if not raw:
+        return None, "[error] requests ต้องมีอย่างน้อย 1 รายการ"
+    if len(raw) > config.READ_FILE_MAX_FILES:
+        return None, f"[error] read_file อ่านพร้อมกันได้ไม่เกิน {config.READ_FILE_MAX_FILES} ไฟล์ต่อครั้ง"
+
+    requests: list[dict] = []
+    for index, item in enumerate(raw, 1):
+        if not isinstance(item, dict):
+            return None, f"[error] requests[{index}] ต้องเป็น object"
+        unknown = sorted(set(item) - _REQUEST_FIELDS)
+        if unknown:
+            return None, f"[error] requests[{index}] มี field ที่ไม่รองรับ: {', '.join(unknown)}"
+        path = item.get("path")
+        if not isinstance(path, str) or not path.strip():
+            return None, f"[error] requests[{index}].path ต้องเป็นข้อความที่ไม่ว่าง"
+        contains = str(item.get("contains") or "").strip()
+        if len(contains) > _MAX_CONTAINS_CHARS:
+            return None, f"[error] requests[{index}].contains ยาวเกิน {_MAX_CONTAINS_CHARS} ตัวอักษร"
+        start_line = str(item.get("start_line") or "")
+        end_line = str(item.get("end_line") or "")
+        if contains and (start_line or end_line):
+            return None, f"[error] requests[{index}] ห้ามใช้ contains ร่วมกับ start_line/end_line"
+        try:
+            context_lines = int(item.get("context_lines", 3))
+        except (TypeError, ValueError):
+            return None, f"[error] requests[{index}].context_lines ต้องเป็นตัวเลข"
+        if not 0 <= context_lines <= 20:
+            return None, f"[error] requests[{index}].context_lines ต้องอยู่ระหว่าง 0-20"
+        requests.append({
+            "path": path.strip(),
+            "start_line": start_line,
+            "end_line": end_line,
+            "contains": contains,
+            "context_lines": context_lines,
+        })
+    return requests, None
+
+
+def run(args: dict) -> str:
+    """Read one/shared paths or up to four independent requests in parallel."""
+    requests, request_error = _coerce_requests(args)
+    if request_error:
+        return request_error
+    if requests is not None:
+        conflicting = any(
+            args.get(name) not in (None, "", [], ())
+            for name in ("path", "paths", "start_line", "end_line", "contains")
+        ) or "context_lines" in args
+        if conflicting:
+            return "[error] requests ใช้ร่วมกับ path/paths หรือ top-level read options ไม่ได้"
+        if len(requests) == 1:
+            return _run_one(requests[0])
+        with ThreadPoolExecutor(max_workers=min(config.READ_FILE_MAX_FILES, len(requests))) as pool:
+            results = list(pool.map(_run_one, requests))
+        blocks = [
+            f"===== {request['path']} =====\n{result}"
+            for request, result in zip(requests, results)
+        ]
+        return f"[read_file batch: {len(requests)} files; independent requests; concurrent]\n\n" + "\n\n".join(blocks)
+
+    paths = _coerce_paths(args)
+    if not paths:
+        return "[error] ต้องระบุ path, paths หรือ requests อย่างน้อย 1 รายการ"
+    if len(paths) > config.READ_FILE_MAX_FILES:
+        return f"[error] read_file อ่านพร้อมกันได้ไม่เกิน {config.READ_FILE_MAX_FILES} ไฟล์ต่อครั้ง"
+
+    common = {
+        "start_line": str(args.get("start_line") or ""),
+        "end_line": str(args.get("end_line") or ""),
+        "contains": str(args.get("contains") or ""),
+        "context_lines": args.get("context_lines", 3),
+    }
+    if len(paths) == 1:
+        return _run_one({"path": paths[0], **common})
+
+    def read_one(file_path: str) -> str:
+        return _run_one({"path": file_path, **common})
+
+    with ThreadPoolExecutor(max_workers=min(config.READ_FILE_MAX_FILES, len(paths))) as pool:
+        results = list(pool.map(read_one, paths))
+    blocks = [
+        f"===== {path} =====\n{result}"
+        for path, result in zip(paths, results)
+    ]
+    return f"[read_file batch: {len(paths)} files; concurrent]\n\n" + "\n\n".join(blocks)
+
+
 # LangChain entry point — see tools/bash.py's 2026-07-23 note.
 from langchain_core.tools import tool as _lc_tool
 
 
 @_lc_tool
-def read_file(path: str, start_line: str = "", end_line: str = "") -> str:
-    """Read text, code, PDF, and Office files from disk, given their full path.
-    Optionally read only a line range for large files.
+def read_file(
+    paths: list[str] | str | None = None,
+    path: str = "",
+    requests: list[dict] | str | None = None,
+    start_line: str = "",
+    end_line: str = "",
+    contains: str = "",
+    context_lines: int = 3,
+) -> str:
+    """Read one file or up to four known files concurrently.
 
-    Use this directly when the exact path is already known -- given in the
-    question, or already found by a previous rag_search call. Do not call
-    rag_search again for a path you already have.
-    ✅ "Read /Users/me/project/config.py for me" -> read_file(path="/Users/me/project/config.py")
-    ✅ after rag_search already returned PLAN.md's path -> read_file that exact path next"""
+    Use paths=[...] when all files share the same options. Use requests=[...]
+    when each file needs its own contains filter or line range, for example:
+    requests=[{"path":"a.py","contains":"sync_kb"},
+              {"path":"b.py","start_line":"100","end_line":"180"}].
+    contains is case-insensitive, searches the complete source, and returns
+    matching lines plus context_lines. Do not combine contains with a line range.
+    """
     from helpers import turn_guard
-    args = {"path": path, "start_line": start_line, "end_line": end_line}
-    blocked = turn_guard.check("read_file", args)
-    if blocked:
-        return blocked
-    result = run(args)
-    turn_guard.record("read_file", args, result)
+    if requests:
+        guard_args = {"requests": json.dumps(requests, ensure_ascii=False, sort_keys=True)}
+        blocked = turn_guard.check("read_file", guard_args)
+        if blocked:
+            return blocked
+        result = run({"requests": requests})
+    else:
+        supplied_paths = paths if paths else ([path] if path else [])
+        guard_args = {
+            "paths": json.dumps(supplied_paths, ensure_ascii=False),
+            "start_line": start_line,
+            "end_line": end_line,
+            "contains": contains,
+            "context_lines": str(context_lines),
+        }
+        blocked = turn_guard.check("read_file", guard_args)
+        if blocked:
+            return blocked
+        result = run({
+            "paths": supplied_paths,
+            "start_line": start_line,
+            "end_line": end_line,
+            "contains": contains,
+            "context_lines": context_lines,
+        })
+    turn_guard.record("read_file", guard_args, result)
     return result

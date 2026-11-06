@@ -54,7 +54,10 @@ if [[ -z "$SWIFTC" ]]; then
   echo "          xcode-select --install"
 elif "$SWIFTC" "$PROJECT_DIR/helpers/_vision_ocr.swift" -o "$PROJECT_DIR/helpers/vision_ocr_macos"; then
   chmod 755 "$PROJECT_DIR/helpers/vision_ocr_macos"
+  mkdir -p "$PROJECT_DIR/MCP-RagDoc/helpers"
+  install -m 755 "$PROJECT_DIR/helpers/vision_ocr_macos" "$PROJECT_DIR/MCP-RagDoc/helpers/vision_ocr_macos"
   echo "Built: helpers/vision_ocr_macos"
+  echo "Provisioned: MCP-RagDoc/helpers/vision_ocr_macos"
 else
   echo "[warning] Could not build optional Apple Vision OCR helper; continuing without it."
   echo "          Install/fix Xcode Command Line Tools and rerun if image OCR is needed."

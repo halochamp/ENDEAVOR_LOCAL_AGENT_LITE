@@ -1,6 +1,3 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
 """Shared two-pass deterministic sampling for read_file's bounded-RAM path.
 
 The selection algorithm here is lifted verbatim from tools/read_file.py's

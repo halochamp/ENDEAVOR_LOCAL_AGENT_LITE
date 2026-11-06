@@ -1,6 +1,3 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
 """indexer.py — build/update the SQLite FTS5 file index used by tools/rag_search.py.
 
 Run standalone (`python indexer.py`), not during a chat turn — indexing is
@@ -10,10 +7,10 @@ never block a user turn on it.
 Design (PLAN.md §3, §7 Phase 3): everything lives on SSD
 (config.FILE_INDEX_DB, deliberately outside the iCloud-synced project tree
 — see config.py). Incremental via per-file mtime so a re-run only touches
-changed files. Known limitation: files deleted from disk since the last run
-are not pruned from the index yet (acceptable for a personal single-user
-index at this scale; add a cleanup pass later if stale hits become a real
-problem).
+changed files. The normal root is generated knowledge Markdown; build_index's
+stale pass also removes rows that are outside the roots used for the current
+run, which prevents an old whole-machine database from leaking into the new
+knowledge-only RAG.
 
 2026-07-24 (user request: index the whole machine + extract PDF/Office
 content): two changes.
@@ -113,7 +110,18 @@ def _run_with_timeout(fn, timeout: float = _READ_TIMEOUT_SECONDS):
     return value if status == "ok" else None
 
 
-def _is_stale(stored_path: str) -> bool:
+def _path_is_under_roots(stored_path: str, roots: list[Path]) -> bool:
+    path = Path(stored_path).resolve(strict=False)
+    for root in roots:
+        try:
+            path.relative_to(root.resolve(strict=False))
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def _is_stale(stored_path: str, roots: list[Path] | None = None) -> bool:
     """True if a previously-indexed path should be pruned: gone from disk,
     outside the current document-extension policy, or now secret-shaped/secret-path.
     Run only
@@ -121,7 +129,10 @@ def _is_stale(stored_path: str) -> bool:
     stall on the same class of mount that _index_file's reads guard against.
     """
     path = Path(stored_path)
+    outside_roots = roots is not None and not _path_is_under_roots(stored_path, roots)
     return (
+        outside_roots
+        or
         path.suffix.lower() not in _INDEXABLE_DOCUMENT_SUFFIXES
         or not path.exists()
         or path_is_or_contains_secret(stored_path)
@@ -448,7 +459,7 @@ def build_index(
                 break
             last_path = stale[-1][0]
             for stored_path, fts_rowid in stale:
-                should_delete = _run_with_timeout(lambda p=stored_path: _is_stale(p))
+                should_delete = _run_with_timeout(lambda p=stored_path: _is_stale(p, roots))
                 if should_delete:
                     conn.execute("DELETE FROM files_fts WHERE rowid = ?", (fts_rowid,))
                     conn.execute("DELETE FROM meta WHERE path = ?", (stored_path,))

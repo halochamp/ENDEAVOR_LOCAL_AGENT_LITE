@@ -1,6 +1,3 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
 """agent.py — turn orchestration around the LangGraph react agent (react.py).
 
 Architecture switch (2026-07-23, user request — see config.py's module
@@ -16,21 +13,23 @@ shrank to what LangGraph doesn't provide out of the box:
      MAX_HISTORY_TURNS/MAX_HISTORY_CHARS. The full LangGraph run (with real
      tool outputs) happens on a throwaway `working` message list per turn,
      never persisted.
-  2. Per-turn guardrail reset (helpers/turn_guard.reset()) — the actual
-     repeat-call/quota checks now live inside each tool wrapper
-     (tools/*.py), not here; this just resets that shared state before each
-     turn and reads back its tool-call log afterward.
+  2. Per-turn guardrail reset (helpers/turn_guard.reset()) — repeat-call/quota
+     checks live inside each tool wrapper. This module additionally hard-stops
+     only after bash/web_search received one exact-duplicate wrapper hint and
+     still emitted the same call again; changed arguments remain recoverable.
   3. A step budget via LangGraph's own recursion_limit config, and a crash
      safety net around .invoke() (server down, timeout, GraphRecursionError).
 """
 from __future__ import annotations
 import json
 import functools
+import os
 import re
 import shlex
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 
 from langchain_core.callbacks import BaseCallbackHandler
@@ -45,11 +44,17 @@ from helpers import search_scope
 from helpers.sensitive_paths import contains_secret_content, is_sensitive_path
 from react import build_react_agent
 from tools import bash as _bash_tool
-from tools import rag_search as _rag_search_tool
+from tools import local_search as _local_search_tool
+from tools import mcp_client as _mcp_tool
 from tools import read_image as _read_image_tool
 from tools import web_search as _web_search_tool
 
 _LOG_PATH = config.LOG_DIR / "session.jsonl"
+_LOG_MAX_BYTES = 5 * 1024 * 1024
+_LOG_BACKUP_COUNT = 3
+_LOG_VALUE_MAX_CHARS = 8_000
+_LOG_LOCK = threading.Lock()
+_LOG_PATH_KEYS = {"path", "cwd", "file", "filename", "directory", "root"}
 
 MAX_HISTORY_TURNS = 5
 MAX_HISTORY_CHARS = 20_000
@@ -58,35 +63,84 @@ MAX_HISTORY_CHARS = 20_000
 # answer step. Mirrors the old hand-rolled StepBudget's MAX_TOOL_STEPS.
 _RECURSION_LIMIT = config.MAX_TOOL_STEPS * 2 + 2
 
-_react_agents: dict[bool, object] = {}
+_react_agents: dict[tuple[bool, int], object] = {}
 _TURN_LOCK = threading.RLock()
+_HINT_RETRY_TOOLS = frozenset({"bash", "web_search"})
+
+
+@dataclass
+class _ToolCallAttemptState:
+    seen: set[tuple[str, str]] = field(default_factory=set)
+    last_key: tuple[str, str] | None = None
+    streak: int = 0
+
+
+def _tool_call_attempt(
+    state: _ToolCallAttemptState, name: str, args: dict,
+) -> tuple[int, bool]:
+    """Register a model-emitted call and decide whether outer hard-stop is due.
+
+    bash/web_search use a consecutive streak: the second identical emission is
+    allowed through so the wrapper can return its actionable hint; the third
+    identical emission hard-stops. Any changed tool/args resets that streak.
+    Other tools retain the historical second-identical-call stop anywhere in
+    the turn.
+    """
+    key_args = (
+        _read_image_tool.progressive_guard_args(args)
+        if name == "read_image"
+        else args
+    )
+    key = (name, json.dumps(key_args, sort_keys=True, ensure_ascii=False, default=str))
+    if name in _HINT_RETRY_TOOLS:
+        state.streak = state.streak + 1 if state.last_key == key else 1
+        state.last_key = key
+        state.seen.add(key)
+        return state.streak, state.streak >= 3
+
+    duplicate = key in state.seen
+    state.seen.add(key)
+    state.last_key = key
+    state.streak = 1
+    return (2 if duplicate else 1), duplicate
 
 
 def _serialized_turn(fn):
-    """Keep process-global tool guard and pending-image state turn-scoped."""
+    """Keep process-global tool guards and progressive image state turn-scoped."""
     @functools.wraps(fn)
     def wrapped(*args, **kwargs):
         with _TURN_LOCK:
             user_input = args[0] if args else kwargs.get("user_input", "")
             token = search_scope.set_request_query(user_input)
+            stale = _read_image_tool.begin_image_turn()
+            if stale:
+                _log({"event": "vision_stale_cleanup", "count": stale})
+            _read_image_tool.purge_orphaned_pending_images()
             try:
                 return fn(*args, **kwargs)
             finally:
+                _read_image_tool.end_image_turn()
                 search_scope.reset_request_query(token)
     return wrapped
 
 
-def _get_react_agent(streaming: bool = False):
-    """Return the cached graph without overriding the global thinking mode.
+def _get_react_agent(streaming: bool = False, thinking_budget: int | None = None):
+    """Return a cached graph for this transport/thinking-budget pair.
 
     Tool selection, argument construction, and interpreting a tool result all
-    benefit from the same bounded reasoning budget as a direct answer.  Keep
-    the only graph split that is actually required: streaming versus regular
-    transport.  ``build_llm`` owns the single thinking policy for both.
+    benefit from the same bounded reasoning budget as a direct answer.  The UI
+    may choose a bounded effort profile per session; cache one graph per
+    profile so changing it affects the next turn without rebuilding repeatedly.
     """
-    if streaming not in _react_agents:
-        _react_agents[streaming] = build_react_agent(streaming=streaming)
-    return _react_agents[streaming]
+    budget = config.THINKING_BUDGET if thinking_budget is None else int(thinking_budget)
+    budget = max(0, min(4096, budget))
+    key = (bool(streaming), budget)
+    if key not in _react_agents:
+        build_args = {"streaming": streaming}
+        if thinking_budget is not None:
+            build_args["extra_body"] = {"thinking_budget": budget}
+        _react_agents[key] = build_react_agent(**build_args)
+    return _react_agents[key]
 
 
 def _response_has_tool_calls(response) -> bool:
@@ -195,18 +249,104 @@ _PATH_LIKE_QUERY_TOKEN_RE = re.compile(
     r"(?:~|/(?:Users|Volumes|private|tmp|var|etc|Library|System|opt|home))/[^\s`\]>,)]+"
 )
 _WEB_REQUEST_RE = re.compile(
-    r"(?:ค้นหา(?:ว่า)?|ค้นข้อมูล|หาข้อมูล|แนบลิงก์|แหล่งที่มา|ล่าสุด|ข่าว|\bsearch\b|\blook\s+up\b|\blatest\b|\bsources?\b)",
+    r"(?:ค้นหา(?:ว่า)?|ค้นข้อมูล|หาข้อมูล|แนบลิงก์|แหล่งที่มา|ล่าสุด|ตอนนี้|ปัจจุบัน|ข่าว|\bsearch\b|\blook\s+up\b|\bnow\b|\blatest\b|\bcurrent\b|\bsources?\b)",
+    re.IGNORECASE,
+)
+_WEB_SEARCH_FOLLOWUP_RE = re.compile(
+    r"^\s*(?:(?:คุณ|ช่วย|กรุณา)\s*)?(?:ไป\s*)?(?:ค้นหา|search(?:\s+it)?)"
+    r"\s*(?:ข้อมูล\s*)?(?:ก่อน\s*)?(?:ตอบ|answer)(?:\s*(?:สิ|ด้วย|นะ|หน่อย))?\s*[.!?]*\s*$",
     re.IGNORECASE,
 )
 _LOCAL_FILE_REQUEST_RE = re.compile(
-    r"(?:ไฟล์|เอกสาร|ในเครื่อง|บนเครื่อง|โปรเจกต์|โฟลเดอร์|path|/Users/|/Volumes/|\bfile\b|\bdocument\b)",
+    r"(?:ไฟล์|เอกสาร|ในเครื่อง|บนเครื่อง|โปรเจกต์|โฟลเดอร์|\bpath\b|/Users/|/Volumes/|\bfile\b|\bdocument\b)",
+    re.IGNORECASE,
+)
+_WEB_FACET_SPLIT_RE = re.compile(
+    r"\s*(?:และ|(?<!เกี่ยว)กับ|/|,)\s*",
     re.IGNORECASE,
 )
 
 
 def _should_force_web_search(query: str) -> bool:
     """Catch a missed web route without affecting local file requests."""
-    return bool(_WEB_REQUEST_RE.search(query or "")) and not _LOCAL_FILE_REQUEST_RE.search(query or "")
+    return (
+        bool(_WEB_REQUEST_RE.search(query or ""))
+        and not _LOCAL_FILE_REQUEST_RE.search(query or "")
+        and not search_scope.is_knowledge_base_query(query)
+        and not search_scope.is_knowledge_base_explanation_query(query)
+    )
+
+
+def _is_web_search_followup(query: str) -> bool:
+    """Recognize a bare request to research the immediately prior topic."""
+    return bool(_WEB_SEARCH_FOLLOWUP_RE.fullmatch((query or "").strip()))
+
+
+def _web_search_subject(user_input: str, messages: list[dict]) -> str:
+    """Use the prior substantive question for a bare "search first" follow-up."""
+    if not _is_web_search_followup(user_input):
+        return user_input.strip()
+    for message in reversed(messages):
+        if message.get("role") != "user":
+            continue
+        candidate = str(message.get("content") or "").strip()
+        if candidate and not _is_web_search_followup(candidate):
+            return candidate
+    return user_input.strip()
+
+
+def _focused_web_queries(subject: str) -> str | list[str]:
+    """Split a current broad topic into bounded, literal search facets.
+
+    This is query shaping, not answer generation: it only preserves subjects
+    already present in the user's text and adds the current calendar year when
+    they explicitly asked about the present. It avoids asking one result page
+    to match two unrelated subjects such as war risk and investment outlook.
+    """
+    value = (subject or "").strip()
+    if not value:
+        return value
+    current = bool(re.search(r"(?:ตอนนี้|ปัจจุบัน|ล่าสุด|\bnow\b|\bcurrent\b|\blatest\b)", value, re.IGNORECASE))
+    year = str(date.today().year)
+    if re.search(r"สงคราม|ความขัดแย้ง", value, re.IGNORECASE) and re.search(r"ลงทุน|ตลาด(?:การเงิน)?", value, re.IGNORECASE):
+        return [
+            f"ความขัดแย้งระหว่างประเทศ {year}",
+            f"การลงทุนโลก {year}",
+        ]
+    if not current and not _WEB_FACET_SPLIT_RE.search(value):
+        return value
+
+    simplified = re.sub(
+        r"(?:บรรยากาศ|สถานการณ์|ภาพรวม|ตอนนี้|ปัจจุบัน|ล่าสุด|เป็นอย่างไร|มีอะไรบ้าง|ช่วยค้นหา(?:ว่า)?|ค้นหา(?:ว่า)?)",
+        " ", value, flags=re.IGNORECASE,
+    )
+    facets = []
+    for part in _WEB_FACET_SPLIT_RE.split(simplified):
+        facet = part.strip(" ,.?!")
+        if not facet:
+            continue
+        # "เกี่ยวกับ" is a preposition ("about"), not the conjunction "กับ".
+        # When a real later conjunction creates multiple facets, remove only
+        # this leading relation marker from the affected facet.
+        facet = re.sub(r"^เกี่ยวกับ\s*", "", facet, flags=re.IGNORECASE).strip()
+        if facet:
+            facets.append(facet)
+    if not facets:
+        facets = [value]
+    if current and not re.search(r"\b(?:20|25)\d{2}\b", value):
+        facets = [f"{facet} {year}" for facet in facets]
+    unique = list(dict.fromkeys(facets))[:4]
+    return unique[0] if len(unique) == 1 else unique
+
+
+def _web_recovery_query(query: str) -> str | None:
+    """Choose one code-owned, materially different retry for empty web evidence."""
+    official_variant = getattr(_web_search_tool, "_official_site_variant", None)
+    if callable(official_variant):
+        candidate = official_variant(query)
+        if candidate and candidate.strip() != query.strip():
+            return candidate.strip()
+    return None
 
 
 def _has_out_of_scope_path(text: str) -> bool:
@@ -231,16 +371,69 @@ def _query_requests_sensitive_path(query: str) -> bool:
     return False
 
 
+def _logical_tool_name(name: str, args: dict | None = None) -> str:
+    """Map the fixed Lite RAG MCP call back to its semantic tool name.
+
+    Transport remains ``mcp_call_tool`` in LangGraph/Activity events; this map
+    exists only so the established RAG grounding and recovery invariants keep
+    working after moving RAG behind MCP.
+    """
+    if name == "mcp_call_tool" and isinstance(args, dict):
+        if args.get("server") == "lite-rag":
+            tool_name = str(args.get("tool_name") or "").strip()
+            if tool_name == "rag_search":
+                return "rag_search"
+            raw = args.get("arguments_json") or "{}"
+            try:
+                payload = json.loads(raw) if isinstance(raw, str) else dict(raw)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                payload = {}
+            if tool_name == "rag_manage":
+                action = str(payload.get("action") or "").strip().casefold()
+                if action == "sync":
+                    return "sync_kb"
+                if action == "cancel":
+                    return "cancel_sync"
+            if tool_name == "rag_status":
+                view = str(payload.get("view") or "health").strip().casefold()
+                if view == "health":
+                    return "rag_health"
+                if view == "job":
+                    return "sync_status"
+    return name
+
+
+def _normalize_mcp_tool_args(tool_name: str, args: dict) -> dict:
+    """Repair the one safe shorthand emitted by the small model.
+
+    Qwen occasionally emits ``mcp_call_tool(arguments_json=...)`` after a
+    discovery call, omitting the two constant routing fields.  The only
+    provisioned Lite MCP server is the local RAG server, so filling these
+    defaults is bounded and lets the actual wrapper validate/execute the
+    query instead of turning a parser omission into a duplicate-call abort.
+    Explicit server/tool values are never overwritten.
+    """
+    if tool_name != "mcp_call_tool" or not isinstance(args, dict):
+        return args
+    normalized = dict(args)
+    if not str(normalized.get("server") or "").strip():
+        normalized["server"] = "lite-rag"
+    if not str(normalized.get("tool_name") or "").strip():
+        normalized["tool_name"] = "rag_search"
+    return normalized
+
+
 def _ground_project_search_answer(final_text: str, last_tool_name: str | None, last_tool_result: str | None) -> str:
     """Do not display a sibling-project path hallucinated after a local search."""
-    if last_tool_name not in {"rag_search", "bash"} or not last_tool_result:
+    if last_tool_name not in {"rag_search", "bash", "local_search"} or not last_tool_result:
         return final_text
     if not _has_out_of_scope_path(final_text):
         return final_text
     result = _strip_tool_reminder(last_tool_result)
     if _has_out_of_scope_path(result):
         return "ไม่พบผลลัพธ์ที่อยู่ในโปรเจกต์ปัจจุบันจากคำค้นนี้ครับ"
-    return f"ผลการค้นหาในโปรเจกต์ปัจจุบัน:\n\n{result}"
+    heading = "ผลการค้นหาใน Desktop/Documents:" if last_tool_name == "local_search" else "ผลการค้นหาในโปรเจกต์ปัจจุบัน:"
+    return f"{heading}\n\n{result}"
 
 
 def _is_project_no_result_answer(text: str) -> bool:
@@ -420,6 +613,11 @@ def _apply_first_write_overwrite_gate(args: dict, user_query: str, gate_tripped:
 
 
 _SOURCE_URL_RE = re.compile(r"\[source:\s*(https?://[^\]]+)\]")
+_SOURCE_FILE_RE = re.compile(
+    r"^\s*\[source:\s*(/[^\]\r\n]+?)\s*\]\s*$", re.MULTILINE,
+)
+_RAG_FILE_LINE_RE = re.compile(r"^\s*-\s+ไฟล์:\s*(/[^\r\n]+?)\s*$")
+_RAG_LOCATION_LINE_RE = re.compile(r"^\s*หน้า/ตำแหน่ง:\s*(.+?)\s*$")
 _PERCENT_CLAIM_RE = re.compile(
     r"(?<![\w.])\d+(?:[.,]\d+)?\s*(?:%|เปอร์เซ็นต์|ร้อยละ)", re.IGNORECASE,
 )
@@ -432,6 +630,71 @@ def _source_urls(web_search_results: list[str]) -> list[str]:
             if url not in urls:
                 urls.append(url)
     return urls
+
+
+def _source_file_refs(rag_search_results: list[str]) -> list[tuple[str, str]]:
+    """Extract verified Knowledge Base files and their stored locations.
+
+    ``tools/rag_search.py`` emits the same ``[source: ...]`` marker shape as
+    web search, but the source is an absolute local path.  The immediately
+    preceding file/location fields are retained so page/line provenance is
+    not lost when the model summarizes the result.
+    """
+    refs: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for result in rag_search_results:
+        current_path: str | None = None
+        current_location = ""
+        for line in (result or "").splitlines():
+            file_match = _RAG_FILE_LINE_RE.match(line)
+            if file_match:
+                current_path = file_match.group(1).strip()
+                current_location = ""
+                continue
+            location_match = _RAG_LOCATION_LINE_RE.match(line)
+            if location_match:
+                current_location = location_match.group(1).strip()
+                continue
+            marker = _SOURCE_FILE_RE.match(line)
+            if not marker:
+                continue
+            path = marker.group(1).strip()
+            if current_path != path:
+                current_location = ""
+            ref = (path, current_location)
+            if ref not in seen:
+                seen.add(ref)
+                refs.append(ref)
+    return refs
+
+
+def _usable_web_results(web_search_results: list[str]) -> list[str]:
+    """Return source-bearing evidence, excluding retry/error instructions."""
+    return [
+        result for result in web_search_results
+        if result
+        and not result.lstrip().startswith(("[error]", "[blocked]", "[needs_retry]"))
+        and _source_urls([result])
+    ]
+
+
+def _best_web_evidence(web_search_results: list[str]) -> str | None:
+    """Choose one complete result for deterministic completion recovery.
+
+    A model can spend its whole turn issuing changing web queries and then
+    return the final ``[needs_retry]`` instruction. Prefer a vetted result
+    with an authoritative source when one exists; otherwise preserve the
+    first usable result rather than exposing the last failed retry.
+    """
+    usable = _usable_web_results(web_search_results)
+    if not usable:
+        return None
+    authoritative = getattr(_web_search_tool, "_is_authoritative_url", None)
+    if callable(authoritative):
+        for result in usable:
+            if any(authoritative(url) for url in _source_urls([result])):
+                return result
+    return usable[0]
 
 
 def _unsupported_web_percentages(final_text: str, web_search_results: list[str]) -> list[str]:
@@ -482,6 +745,27 @@ def _append_source_citations(final_text: str, web_search_results: list[str]) -> 
     return final_text + footer
 
 
+def _append_rag_source_citations(final_text: str, rag_search_results: list[str]) -> str:
+    """Deterministically attach Knowledge Base source files to the answer.
+
+    RAG results are local files rather than web URLs, so preserve both the
+    absolute path and the page/line location stored on the SQLite chunk.  The
+    model may copy the marker into its prose; remove that copy first so the
+    footer remains the single source-of-truth presentation.
+    """
+    refs = _source_file_refs(rag_search_results)
+    if not refs:
+        return final_text
+    final_text = _SOURCE_FILE_RE.sub("", final_text or "")
+    final_text = re.sub(r"(?m)^\s*[-*]\s*$\n?", "", final_text)
+    final_text = re.sub(r"[ \t]+\n", "\n", final_text).strip()
+    lines = []
+    for path, location in refs:
+        suffix = f" — {location}" if location else ""
+        lines.append(f"- {path}{suffix}")
+    return final_text + "\n\nแหล่งที่มา (Knowledge Base):\n" + "\n".join(lines)
+
+
 _TOOL_REMINDER_RE = re.compile(r"\n\n\[(?:bash usage notes|reminder)\].*", re.DOTALL)
 _NUMBER_RE = re.compile(r"(?<![\w])\d[\d,]*(?:\.\d+)?")
 _PAREN_RE = re.compile(r"\s*\(([^()]*)\)")
@@ -510,6 +794,17 @@ _KNOWN_LOCAL_IMAGE_PATH_RE = re.compile(
     r"/(?:Users|Volumes|private|var|tmp)/[^\n]+\.(?:png|jpe?g|webp|gif|bmp|tiff?|heic|heif)\b",
     re.IGNORECASE,
 )
+_LOCAL_DOCUMENT_FILENAME_RE = re.compile(
+    r"[^\s\"'“”‘’<>`]+\.(?:md|markdown|txt|text|rtf|csv|tsv|pdf|docx?|xlsx?|pptx?|odt|ods|odp|"
+    r"jpe?g|png|webp|gif|bmp|tiff?|heic|heif)\b",
+    re.IGNORECASE,
+)
+_LOCAL_CONTENT_QUERY_RE = re.compile(
+    r"(?:เกี่ยวกับ|พูดถึง|กล่าวถึง|มีคำว่า|คำว่า)\s*"
+    r"(?P<term>[^\n.!?！？。，、]+?)"
+    r"(?=\s*(?:แล้ว|และ|ให้|หน่อย|บ้าง|อะไร|เท่าไร|เท่าไหร่|อยู่ที่ไหน|อยู่ไหน|$))",
+    re.IGNORECASE,
+)
 
 
 def _write_action_required(query: str) -> bool:
@@ -526,6 +821,142 @@ def _requested_image_path(query: str) -> str | None:
     """
     match = _KNOWN_LOCAL_IMAGE_PATH_RE.search(query or "")
     return match.group(0) if match else None
+
+
+def _local_document_search_query(query: str) -> str | None:
+    """Extract an explicit filename or content phrase for local recovery.
+
+    This is intentionally narrower than a general natural-language router:
+    it activates only when the user supplied a supported filename or a
+    clearly delimited phrase such as ``พูดถึงค่าปรับ``.  The model remains
+    responsible for ordinary semantic keyword selection; this fallback exists
+    to finish an obvious local lookup when it diverts to a blocked web call or
+    emits no RAG call.
+    """
+    for match in _LOCAL_DOCUMENT_FILENAME_RE.findall(query or ""):
+        candidate = match.rstrip(".,;:!?！？，。、")
+        if "/" not in candidate and not candidate.startswith("~"):
+            return candidate
+    for match in _LOCAL_CONTENT_QUERY_RE.finditer(query or ""):
+        candidate = re.sub(r"\s+", " ", match.group("term")).strip(" .,;:!?！？，。、")
+        if len(candidate) >= 2:
+            return candidate
+    return None
+
+
+def _rag_search_query(query: str) -> str | None:
+    """Extract a bounded content query after an explicit RAG/KB scope marker."""
+    candidate = _local_document_search_query(query)
+    if candidate:
+        return candidate
+    value = query or ""
+    value = re.sub(
+        r"(?:ช่วย\s*)?(?:ค้นหา|ค้น|หา|ดึงข้อมูล|ดึง|เปิด|อ่าน|สรุป|แสดง|อ้างอิง|ตอบ)",
+        " ", value, flags=re.IGNORECASE,
+    )
+    value = re.sub(
+        r"(?:ใน|จาก|ภายใน|ผ่าน|อ้างอิงจาก)\s*"
+        r"(?:rag_document/(?:raw|md)|\brag_document\b|\b(?:rag|kb)\b|"
+        r"knowledge\s*base|knowledge/(?:raw|md)|ฐานความรู้|คลังความรู้)",
+        " ", value, flags=re.IGNORECASE,
+    )
+    value = re.sub(
+        r"(?:rag_document/(?:raw|md)|knowledge/(?:raw|md)|"
+        r"\b(?:rag|kb|rag_document)\b|knowledge\s*base|ฐานความรู้|คลังความรู้)",
+        " ", value, flags=re.IGNORECASE,
+    )
+    value = re.sub(
+        r"(?:ที่มี(?:เนื้อหา)?|เนื้อหา|เกี่ยวกับ|เรื่อง|หัวข้อ)",
+        " ", value, flags=re.IGNORECASE,
+    )
+    value = re.sub(r"\s+", " ", value).strip(" .,;:!?！？，。、")
+    return value or None
+
+
+def _outside_rag_search_query(query: str) -> str | None:
+    """Extract a short content/filename query for an explicit bash route."""
+    candidate = _local_document_search_query(query)
+    if candidate:
+        return candidate
+    value = query or ""
+    value = re.sub(
+        r"(?:ช่วย\s*)?(?:ค้นหา|ค้น|หา|ดึงข้อมูล|ดึง|เปิด|อ่าน|สรุป|แสดง|อ้างอิง|ตอบ)",
+        " ", value, flags=re.IGNORECASE,
+    )
+    value = re.sub(
+        r"(?:นอก|นอกจาก|ไม่ใช้|ไม่ต้องใช้|ไม่ค้นใน|ไม่ค้นจาก|นอกขอบเขต)\s*"
+        r"(?:rag_document/(?:raw|md)|\brag_document\b|\b(?:rag|kb)\b|"
+        r"knowledge\s*base|knowledge/(?:raw|md)|ฐานความรู้|คลังความรู้)",
+        " ", value, flags=re.IGNORECASE,
+    )
+    value = re.sub(
+        r"(?:rag_document/(?:raw|md)|knowledge/(?:raw|md)|"
+        r"\b(?:rag|kb|rag_document)\b|knowledge\s*base|ฐานความรู้|คลังความรู้)",
+        " ", value, flags=re.IGNORECASE,
+    )
+    value = re.sub(
+        r"(?:ใน|จาก|ภายใน|ผ่าน|ที่มี(?:เนื้อหา)?|เนื้อหา|เกี่ยวกับ|เรื่อง|หัวข้อ)",
+        " ", value, flags=re.IGNORECASE,
+    )
+    value = re.sub(r"\s+", " ", value).strip(" .,;:!?！？，。、")
+    return value or None
+
+
+def _bounded_bash_search_command(term: str | None, raw_roots) -> str | None:
+    """Build one read-only filename/content search inside explicit local roots."""
+    if not term:
+        return None
+    roots = []
+    for raw_root in raw_roots:
+        try:
+            root = Path(raw_root).expanduser().resolve(strict=False)
+        except (OSError, RuntimeError, TypeError, ValueError):
+            continue
+        if root.is_dir() and not is_sensitive_path(root) and root not in roots:
+            roots.append(root)
+    if not roots:
+        return None
+    quoted_roots = " ".join(shlex.quote(str(root)) for root in roots)
+    if _LOCAL_DOCUMENT_FILENAME_RE.fullmatch(term):
+        return f"find {quoted_roots} -type f -name {shlex.quote(term)}"
+    return f"grep -r -l -F {shlex.quote(term)} {quoted_roots}"
+
+
+def _outside_rag_bash_command(query: str) -> str | None:
+    """Build one bounded, read-only bash search over Desktop/Documents."""
+    return _bounded_bash_search_command(
+        _outside_rag_search_query(query),
+        getattr(config, "LOCAL_SEARCH_ROOTS", ()),
+    )
+
+
+def _rag_fallback_bash_command(query: str, *, project_scope: bool = False) -> str | None:
+    """Search the original local scope when the optional RAG MCP is unavailable."""
+    term = (
+        _local_document_search_query(query) or _rag_search_query(query)
+        if project_scope
+        else _rag_search_query(query) or _local_document_search_query(query)
+    )
+    roots = (config.PROJECT_ROOT,) if project_scope else (config.KNOWLEDGE_DIR,)
+    return _bounded_bash_search_command(term, roots)
+
+
+def _rag_mcp_unavailable(result: str | None) -> bool:
+    """Recognize transport/capability failures that justify a scoped bash fallback."""
+    if not result or not result.startswith(("[error]", "[blocked]")):
+        return False
+    normalized = result.casefold()
+    return any(marker in normalized for marker in (
+        "no mcp server named",
+        "mcp_call_tool failed",
+        "tool 'rag_search' not found",
+        "tool not found",
+        "unavailable",
+        "connection",
+        "connecterror",
+        "filenotfounderror",
+        "no such file",
+    ))
 
 
 def _strip_tool_reminder(text: str) -> str:
@@ -569,6 +1000,49 @@ def _strip_unsupported_local_numbers(final_text: str, evidence: list[str], query
     return "\n".join(kept_lines).strip()
 
 
+_LOCAL_FACT_REQUEST_RE = re.compile(
+    r"(?:เท่าไร|เท่าไหร่|จำนวนเท่าใด|(?<!เ)กี่(?:บาท|คน|ไฟล์|วัน|ครั้ง)?(?!ย)|"
+    r"ยอด(?:เงิน|ชำระ)?|ราคา|วันไหน|เมื่อไร|เมื่อไหร่|how much|how many|when)",
+    re.IGNORECASE,
+)
+
+
+def _ground_local_fact_answer(final_text: str, rag_result: str | None, query: str) -> str:
+    """Preserve a requested numeric fact the model dropped from RAG evidence."""
+    if not final_text or not rag_result or not _LOCAL_FACT_REQUEST_RE.search(query or ""):
+        return final_text
+    evidence_numbers = []
+    seen_numbers: set[str] = set()
+    for raw in _NUMBER_RE.findall(rag_result):
+        normalized = raw.replace(",", "")
+        if normalized not in seen_numbers:
+            seen_numbers.add(normalized)
+            evidence_numbers.append(raw)
+    answer_numbers = {raw.replace(",", "") for raw in _NUMBER_RE.findall(final_text)}
+    missing = [raw for raw in evidence_numbers if raw.replace(",", "") not in answer_numbers]
+    if not missing:
+        return final_text
+
+    # Prefer actual snippet lines over result-count/byte-size headers. The raw
+    # RAG response is already bounded and source-grounded, so this is a
+    # deterministic recovery of the fact rather than a new summary.
+    evidence_lines = []
+    for line in rag_result.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith(("พบ ", "[", "- /")):
+            continue
+        line_numbers = {n.replace(",", "") for n in _NUMBER_RE.findall(stripped)}
+        if line_numbers.intersection({n.replace(",", "") for n in missing}):
+            evidence_lines.append(stripped)
+    if not evidence_lines:
+        return final_text
+    return (
+        f"{final_text.rstrip()}\n\n"
+        "รายละเอียดตัวเลขจากข้อความในเอกสาร:\n"
+        + "\n".join(f"- {line}" for line in evidence_lines[:3])
+    )
+
+
 def _ground_image_text_answer(final_text: str, image_result: str, query: str) -> str:
     """Use deterministic OCR for an explicit image-text request.
 
@@ -588,24 +1062,80 @@ def _ground_image_text_answer(final_text: str, image_result: str, query: str) ->
     return f"ข้อความที่อ่านได้จากภาพ:\n\n{ocr}"
 
 
-def _fallback_summary(tool_log: list[str]) -> str:
+def _fallback_summary(
+    tool_log: list[str],
+    last_tool_name: str | None = None,
+    last_tool_result: str | None = None,
+) -> str:
     """Deterministic Thai stand-in for a degenerate boilerplate final answer
     (see helpers.guardrails.is_boilerplate_refusal) -- built from the tool
-    log's own success/fail record rather than trusting the model to retry
-    the summary correctly a second time."""
+    log's own success/fail record rather than trusting the model to retry the
+    summary correctly a second time.  If a tool already returned usable
+    evidence, expose that verified result instead of replacing a partially
+    successful turn with a content-free apology."""
     if not tool_log:
         return "ขออภัย ไม่สามารถสรุปคำตอบได้ในตอนนี้ กรุณาถามใหม่อีกครั้ง"
     if all(line.endswith("ล้มเหลว") for line in tool_log):
         return "ลองค้นหา/ตรวจสอบแล้วแต่ไม่พบข้อมูลที่ต้องการ กรุณาระบุคำค้นหรือชื่อไฟล์ให้ชัดเจนขึ้น"
+    if last_tool_result and not last_tool_result.startswith(("[error]", "[blocked]")):
+        success_count = sum("-> สำเร็จ" in line for line in tool_log)
+        failure_count = len(tool_log) - success_count
+        tool_label = last_tool_name or "เครื่องมือ"
+        return (
+            f"ตรวจสอบด้วย {tool_label} แล้ว แต่โมเดลสรุปผลไม่ทัน "
+            f"(สำเร็จ {success_count} ครั้ง, ล้มเหลว {failure_count} ครั้ง) "
+            "จึงแสดงผลที่ยืนยันได้จากเครื่องมือ:\n\n"
+            f"{_strip_tool_reminder(last_tool_result)}"
+        )
     return "ได้ข้อมูลจากเครื่องมือค้นหาแล้ว แต่สรุปคำตอบไม่สำเร็จ กรุณาถามอีกครั้งหรือระบุคำถามให้ชัดเจนขึ้น"
 
 
-def _log(event: dict) -> None:
-    event["ts"] = time.time()
+def _redact_log_value(value, *, key: str = ""):
+    """Keep diagnostics useful without persisting credential-shaped values."""
+    if isinstance(value, dict):
+        return {str(name): _redact_log_value(item, key=str(name)) for name, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_redact_log_value(item, key=key) for item in value]
+    text = str(value)
+    if contains_secret_content(text):
+        return "[redacted: sensitive value]"
+    if key.casefold() in _LOG_PATH_KEYS and is_sensitive_path(text):
+        return "[redacted: sensitive path]"
+    return text[:_LOG_VALUE_MAX_CHARS]
+
+
+def _rotate_session_log() -> None:
     try:
-        with open(_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps(event, ensure_ascii=False) + "\n")
-        _LOG_PATH.chmod(0o600)
+        if _LOG_PATH.stat().st_size <= _LOG_MAX_BYTES:
+            return
+    except OSError:
+        return
+    for index in range(_LOG_BACKUP_COUNT, 0, -1):
+        source = _LOG_PATH.with_name(f"{_LOG_PATH.name}.{index}")
+        target = _LOG_PATH.with_name(f"{_LOG_PATH.name}.{index + 1}")
+        try:
+            if index == _LOG_BACKUP_COUNT:
+                source.unlink(missing_ok=True)
+            elif source.exists():
+                os.replace(source, target)
+        except OSError:
+            pass
+    try:
+        os.replace(_LOG_PATH, _LOG_PATH.with_name(f"{_LOG_PATH.name}.1"))
+    except OSError:
+        pass
+
+
+def _log(event: dict) -> None:
+    safe_event = _redact_log_value(event)
+    safe_event["ts"] = time.time()
+    try:
+        with _LOG_LOCK:
+            _LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            _rotate_session_log()
+            with open(_LOG_PATH, "a", encoding="utf-8") as f:
+                f.write(json.dumps(safe_event, ensure_ascii=False, default=str) + "\n")
+            _LOG_PATH.chmod(0o600)
     except Exception:
         pass
 
@@ -627,6 +1157,7 @@ def run_turn(
     attachment_image: str | None = None,
     cancel_event=None,
     stream_tokens: bool = False,
+    effort: str | None = None,
 ) -> TurnResult:
     """`messages` is the persisted, compacted cross-turn history — mutated
     in place with exactly one new compact (user, assistant) pair per call.
@@ -648,11 +1179,9 @@ def run_turn(
     if on_step is None:
         on_step = lambda **_: None
 
-    # A queued image belongs only to the graph turn that produced it.  If a
-    # prior graph crashed between its tools and agent nodes, never attach that
-    # old image to this user's new question.
-    _read_image_tool.discard_pending_images()
-    _read_image_tool.purge_orphaned_pending_images()
+    # Progressive image lifecycle is owned by _serialized_turn(): stale
+    # snapshots are drained before this body and all current-turn views are
+    # released in its finally block, including graph exceptions/cancellation.
     injected_input = inject_datetime_context(user_input)
     if attachment_image:
         # Browser attachments are an explicit user instruction, not a routing
@@ -665,6 +1194,16 @@ def run_turn(
         on_step(event="tool_done", name="read_image", ok=attachment_ok)
         injected_input += f"\n\n[ไฟล์รูปที่ผู้ใช้แนบ — ระบบอ่านภาพแล้ว]\n{attachment_result}"
     turn_guard.reset(user_input)
+    local_document_request = search_scope.is_local_document_query(user_input)
+    rag_request = search_scope.is_knowledge_base_query(user_input)
+    outside_rag_request = search_scope.is_outside_knowledge_base_query(user_input)
+    web_request = _web_search_subject(user_input, messages)
+    force_web_search = (
+        _should_force_web_search(user_input)
+        or _is_web_search_followup(user_input)
+    ) and not local_document_request and not rag_request and not outside_rag_request
+    forced_web_query = _focused_web_queries(web_request)
+    code_owned_web_query = isinstance(forced_web_query, list) or _is_web_search_followup(user_input)
     working = _to_lc_messages(messages)
     working.append(HumanMessage(content=injected_input))
 
@@ -692,7 +1231,14 @@ def run_turn(
     # query and would make phrase-specific intent extraction a hidden second
     # router. The system prompt now makes the argument contract explicit.
 
-    agent = _get_react_agent(streaming=stream_tokens)
+    # mlx_vlm's Qwen3.5 tool-call parser is reliable on streaming responses;
+    # the non-stream endpoint can return legacy <tool_call> XML as plain text
+    # and repeat it until max_tokens without producing a structured call. Keep
+    # transport streaming enabled for every caller, while stream_tokens still
+    # controls whether UI token events are exposed to the caller.
+    effort = config.normalize_thinking_effort(effort)
+    thinking_budget = config.thinking_budget_for_effort(effort)
+    agent = _get_react_agent(streaming=True, thinking_budget=thinking_budget)
     run_config = {"recursion_limit": _RECURSION_LIMIT}
     if stream_tokens:
         run_config["callbacks"] = [_TokenStreamCallback(on_step, cancel_event)]
@@ -700,6 +1246,7 @@ def run_turn(
     try:
         final_msg = None
         web_search_results: list[str] = []
+        rag_search_results: list[str] = []
         local_evidence_results: list[str] = []
         if direct_image_path and image_ok:
             local_evidence_results.append(image_result)
@@ -710,17 +1257,112 @@ def run_turn(
             image_result if direct_image_path and image_ok else None
         )
         first_rag_result: str | None = None
-        first_rag_query: str | None = None
-        bash_seen = False
-        forced_whole_machine_result: str | None = None
+        first_local_search_result: str | None = None
+        local_search_results: list[str] = []
         forced_web_result: str | None = None
         write_overwrite_gate_tripped = False
-        issued_tool_calls: set[tuple[str, str]] = set()
+        tool_call_attempts = _ToolCallAttemptState()
+        logical_tool_by_call_id: dict[str, str] = {}
+        rag_search_called = False
+        rag_mcp_unavailable = False
+        rag_fallback_bash_called = False
+        rag_fallback_scope: str | None = None
         if direct_image_path:
-            issued_tool_calls.add((
-                "read_image",
-                json.dumps({"path": direct_image_path}, sort_keys=True, ensure_ascii=False),
-            ))
+            _tool_call_attempt(tool_call_attempts, "read_image", {"path": direct_image_path})
+        # Explicit RAG/Knowledge Base scope is a hard boundary.  Open the
+        # deterministic MCP search before the model's first synthesis call and
+        # preload its ToolMessage, so the model cannot divert this request to
+        # web_search or answer from memory before seeing the local evidence.
+        if rag_request:
+            rag_query = _rag_search_query(user_input)
+            if rag_query:
+                rag_args = {
+                    "server": "lite-rag",
+                    "tool_name": "rag_search",
+                    "arguments_json": json.dumps(
+                        {"query": rag_query}, ensure_ascii=False,
+                    ),
+                }
+                rag_search_called = True
+                on_step(event="tool_start", name="mcp_call_tool", args=rag_args)
+                rag_result = _mcp_tool.mcp_call_tool.invoke(rag_args)
+                rag_ok = not rag_result.startswith(("[error]", "[blocked]"))
+                on_step(event="tool_done", name="mcp_call_tool", ok=rag_ok)
+                if rag_ok:
+                    rag_search_results.append(rag_result)
+                    first_rag_result = rag_result
+                    last_tool_name, last_tool_result = "rag_search", rag_result
+                    local_evidence_results.append(rag_result)
+                    rag_call_id = "policy-rag-search"
+                    working.extend([
+                        AIMessage(content="", tool_calls=[{
+                            "name": "mcp_call_tool", "args": rag_args,
+                            "id": rag_call_id, "type": "tool_call",
+                        }]),
+                        ToolMessage(
+                            content=rag_result,
+                            tool_call_id=rag_call_id,
+                            name="mcp_call_tool",
+                        ),
+                    ])
+                else:
+                    rag_mcp_unavailable = _rag_mcp_unavailable(rag_result)
+                    if rag_mcp_unavailable:
+                        bash_command = _rag_fallback_bash_command(user_input)
+                        if bash_command:
+                            bash_args = {"command": bash_command}
+                            on_step(event="tool_start", name="bash", args=bash_args)
+                            bash_result = _bash_tool.bash.invoke(bash_args)
+                            bash_ok = not bash_result.startswith(("[error]", "[blocked]"))
+                            on_step(event="tool_done", name="bash", ok=bash_ok)
+                            rag_fallback_bash_called = True
+                            rag_fallback_scope = "knowledge"
+                            if bash_ok:
+                                first_local_search_result = bash_result
+                                local_search_results.append(bash_result)
+                                last_tool_name, last_tool_result = "bash", bash_result
+                                local_evidence_results.append(bash_result)
+                                bash_call_id = "policy-rag-unavailable-bash-search"
+                                working.extend([
+                                    AIMessage(content="", tool_calls=[{
+                                        "name": "bash", "args": bash_args,
+                                        "id": bash_call_id, "type": "tool_call",
+                                    }]),
+                                    ToolMessage(
+                                        content=bash_result,
+                                        tool_call_id=bash_call_id,
+                                        name="bash",
+                                    ),
+                                ])
+        # Explicitly asking to search outside the local Knowledge Base is a
+        # hard bash boundary.  Run one deterministic, read-only search over
+        # the configured Desktop/Documents roots before the model's first
+        # synthesis call, so it cannot divert the request to RAG or web search.
+        if outside_rag_request:
+            bash_command = _outside_rag_bash_command(user_input)
+            if bash_command:
+                bash_args = {"command": bash_command}
+                on_step(event="tool_start", name="bash", args=bash_args)
+                bash_result = _bash_tool.bash.invoke(bash_args)
+                bash_ok = not bash_result.startswith(("[error]", "[blocked]"))
+                on_step(event="tool_done", name="bash", ok=bash_ok)
+                if bash_ok:
+                    first_local_search_result = bash_result
+                    local_search_results.append(bash_result)
+                    last_tool_name, last_tool_result = "bash", bash_result
+                    local_evidence_results.append(bash_result)
+                    bash_call_id = "policy-outside-rag-bash-search"
+                    working.extend([
+                        AIMessage(content="", tool_calls=[{
+                            "name": "bash", "args": bash_args,
+                            "id": bash_call_id, "type": "tool_call",
+                        }]),
+                        ToolMessage(
+                            content=bash_result,
+                            tool_call_id=bash_call_id,
+                            name="bash",
+                        ),
+                    ])
         duplicate_tool_call: dict | None = None
         cancelled = False
         for update in agent.stream(
@@ -739,26 +1381,36 @@ def run_turn(
                         for tc in tool_calls:
                             args = dict(tc.get("args", {}))
                             args = _normalize_write_tool_args(tc["name"], args, user_input)
+                            args = _normalize_mcp_tool_args(tc["name"], args)
                             args, write_overwrite_gate_tripped = _apply_first_write_overwrite_gate(
                                 args, user_input, write_overwrite_gate_tripped,
                             )
-                            if tc["name"] == "rag_search" and first_rag_query is None:
-                                first_rag_query = str(args.get("query") or "").strip()
                             if tc["name"] == "bash" and isinstance(args.get("command"), str):
                                 args["command"] = _bash_tool.normalize_command_for_query(
                                     args["command"], user_input,
                                 )
                             tc["args"] = args
-                            key = (
-                                tc["name"],
-                                json.dumps(args, sort_keys=True, ensure_ascii=False, default=str),
+                            logical_name = _logical_tool_name(tc["name"], args)
+                            if logical_name == "rag_search":
+                                rag_search_called = True
+                            call_id = str(tc.get("id") or "")
+                            if call_id:
+                                logical_tool_by_call_id[call_id] = logical_name
+                            attempt_count, should_stop_duplicate = _tool_call_attempt(
+                                tool_call_attempts, tc["name"], args,
                             )
-                            if key in issued_tool_calls:
-                                duplicate_tool_call = {"name": tc["name"], "args": args}
+                            if should_stop_duplicate:
+                                duplicate_tool_call = {
+                                    "name": tc["name"], "logical_name": logical_name, "args": args,
+                                }
                                 _log({"event": "duplicate_tool_loop_stopped", **duplicate_tool_call})
                                 stop_for_duplicate = True
                                 break
-                            issued_tool_calls.add(key)
+                            if attempt_count == 2 and tc["name"] in _HINT_RETRY_TOOLS:
+                                _log({
+                                    "event": "duplicate_tool_hint_passed_to_wrapper",
+                                    "name": tc["name"], "logical_name": logical_name, "args": args,
+                                })
                             on_step(event="tool_start", name=tc["name"], args=args)
                         if not tool_calls:
                             final_msg = m
@@ -767,11 +1419,11 @@ def run_turn(
                         # issue order. ToolMessage already carries the true
                         # name and execution status, so never infer either
                         # from a FIFO queue of prior agent calls.
-                        name = getattr(m, "name", None) or "?"
+                        raw_name = getattr(m, "name", None) or "?"
+                        call_id = str(getattr(m, "tool_call_id", "") or "")
+                        name = logical_tool_by_call_id.get(call_id, raw_name)
                         content = m.content if isinstance(m.content, str) else str(m.content)
-                        if name == "bash":
-                            bash_seen = True
-                        if name == "web_search":
+                        if name == "web_search" and not content.startswith("[blocked]"):
                             web_search_results.append(content)
                         status = getattr(m, "status", None)
                         ok = status != "error" and not (
@@ -779,12 +1431,19 @@ def run_turn(
                         )
                         if name == "write_file" and not ok and not _user_explicitly_allows_overwrite(user_input):
                             write_overwrite_gate_tripped = True
-                        on_step(event="tool_done", name=name, ok=ok)
+                        on_step(event="tool_done", name=raw_name, ok=ok)
                         if ok:
                             last_tool_name, last_tool_result = name, content
-                            if name == "rag_search" and first_rag_result is None:
-                                first_rag_result = content
-                            if name in {"bash", "rag_search", "read_file", "read_image"}:
+                            if name == "rag_search":
+                                rag_search_called = True
+                                rag_search_results.append(content)
+                                if first_rag_result is None:
+                                    first_rag_result = content
+                            if name == "local_search":
+                                local_search_results.append(content)
+                                if first_local_search_result is None:
+                                    first_local_search_result = content
+                            if name in {"bash", "rag_search", "local_search", "read_file", "read_image"}:
                                 local_evidence_results.append(content)
                     if stop_for_duplicate:
                         break
@@ -793,35 +1452,106 @@ def run_turn(
             if stop_for_duplicate:
                 break
 
-        # A whole-machine request needs a completeness pass even when the
-        # global RAG index already returned a few hits. The model selected the
-        # concise first query; the code only supplies the required Spotlight
-        # backend and records it like a normal tool call. This prevents a
-        # partial index result from being presented as the whole machine.
-        if (
-            not cancelled
-            and search_scope.is_whole_machine_query(user_input)
-            and first_rag_query
-            and not bash_seen
-        ):
-            whole_machine_command = f"mdfind {shlex.quote(first_rag_query)}"
-            on_step(event="tool_start", name="bash", args={"command": whole_machine_command})
-            whole_machine_result = _bash_tool.bash.invoke({"command": whole_machine_command})
-            whole_machine_ok = not whole_machine_result.startswith(("[error]", "[blocked]"))
-            on_step(event="tool_done", name="bash", ok=whole_machine_ok)
-            if whole_machine_ok:
-                last_tool_name, last_tool_result = "bash", whole_machine_result
-                local_evidence_results.append(whole_machine_result)
-                forced_whole_machine_result = whole_machine_result
+        # Local document requests are a hard routing boundary.  A small model
+        # can still choose web_search despite the prompt, especially when the
+        # requested filename is Thai.  The web wrapper blocks that call; keep
+        # any such response out of the web-evidence path and make one bounded,
+        # exact-filename/content-phrase recovery so an obvious local lookup
+        # can finish even when Qwen emits no tool call or chooses the KB for a
+        # generic user-file request. Explicit KB/project requests stay on RAG;
+        # generic requests use the deterministic Desktop/Documents helper.
+        if local_document_request and not outside_rag_request:
+            web_search_results.clear()
+            local_search_query = _local_document_search_query(user_input)
+            knowledge_scope = (
+                search_scope.is_knowledge_base_query(user_input)
+                or search_scope.is_project_scoped_query(user_input)
+            )
+            if local_search_query and not _PATH_LIKE_QUERY_TOKEN_RE.search(user_input) and not local_search_results:
+                # Keep the established RAG-first behavior. A generic local
+                # request gets one KB probe for backwards compatibility, then
+                # falls through to Desktop/Documents only when that probe is
+                # absent or not useful. Explicit KB/project requests stop at
+                # the RAG boundary and never broaden their scope.
+                if not rag_search_called and not _has_useful_project_rag_evidence(first_rag_result):
+                    rag_args = {
+                        "server": "lite-rag",
+                        "tool_name": "rag_search",
+                        "arguments_json": json.dumps(
+                            {"query": local_search_query}, ensure_ascii=False,
+                        ),
+                    }
+                    on_step(event="tool_start", name="mcp_call_tool", args=rag_args)
+                    rag_result = _mcp_tool.mcp_call_tool.invoke(rag_args)
+                    rag_ok = not rag_result.startswith(("[error]", "[blocked]"))
+                    on_step(event="tool_done", name="mcp_call_tool", ok=rag_ok)
+                    if rag_ok:
+                        last_tool_name, last_tool_result = "rag_search", rag_result
+                        rag_search_results.append(rag_result)
+                        first_rag_result = rag_result
+                        local_evidence_results.append(rag_result)
+                    else:
+                        rag_mcp_unavailable = rag_mcp_unavailable or _rag_mcp_unavailable(rag_result)
+                if (
+                    rag_mcp_unavailable
+                    and not _has_useful_project_rag_evidence(first_rag_result)
+                    and not local_search_results
+                    and not rag_fallback_bash_called
+                ):
+                    project_scope = search_scope.is_project_scoped_query(user_input)
+                    bash_command = (
+                        _rag_fallback_bash_command(user_input, project_scope=True)
+                        if project_scope
+                        else _outside_rag_bash_command(user_input)
+                    )
+                    if bash_command:
+                        bash_args = {"command": bash_command}
+                        on_step(event="tool_start", name="bash", args=bash_args)
+                        bash_result = _bash_tool.bash.invoke(bash_args)
+                        bash_ok = not bash_result.startswith(("[error]", "[blocked]"))
+                        on_step(event="tool_done", name="bash", ok=bash_ok)
+                        rag_fallback_bash_called = True
+                        rag_fallback_scope = "project" if project_scope else "local"
+                        local_search_results.append(bash_result)
+                        if bash_ok:
+                            last_tool_name, last_tool_result = "bash", bash_result
+                            first_local_search_result = bash_result
+                            local_evidence_results.append(bash_result)
+                if (
+                    not knowledge_scope
+                    and not rag_mcp_unavailable
+                    and not _has_useful_project_rag_evidence(first_rag_result)
+                    and not local_search_results
+                ):
+                    local_args = {"query": local_search_query}
+                    on_step(event="tool_start", name="local_search", args=local_args)
+                    local_result = _local_search_tool.local_search.invoke(local_args)
+                    local_ok = not local_result.startswith(("[error]", "[blocked]"))
+                    on_step(event="tool_done", name="local_search", ok=local_ok)
+                    local_search_results.append(local_result)
+                    if local_ok:
+                        last_tool_name, last_tool_result = "local_search", local_result
+                        first_local_search_result = local_result
+                        local_evidence_results.append(local_result)
+
+        if rag_request:
+            web_search_results.clear()
+        if outside_rag_request:
+            web_search_results.clear()
+            rag_search_results.clear()
 
         # A current/web request must not silently become a model-only answer.
         # If the small model skipped web_search entirely, issue one guarded
         # call using the original request; tools/web_search owns query
         # normalization and source filtering. The final answer is grounded in
         # that result rather than in the model's unsupported prior prose.
-        if not cancelled and _should_force_web_search(user_input) and not web_search_results:
-            on_step(event="tool_start", name="web_search", args={"query": user_input})
-            web_result = _web_search_tool.web_search.invoke({"query": user_input})
+        if (
+            not cancelled
+            and force_web_search
+            and (code_owned_web_query or not _usable_web_results(web_search_results))
+        ):
+            on_step(event="tool_start", name="web_search", args={"query": forced_web_query})
+            web_result = _web_search_tool.web_search.invoke({"query": forced_web_query})
             web_ok = not web_result.startswith(("[error]", "[blocked]"))
             on_step(event="tool_done", name="web_search", ok=web_ok)
             if web_ok:
@@ -829,10 +1559,36 @@ def run_turn(
                 last_tool_name, last_tool_result = "web_search", web_result
                 forced_web_result = web_result
 
+        # A search engine can return only [needs_retry] messages
+        # even after the model has spent its retry budget.  Make one bounded,
+        # code-owned refinement (official-source variant when available) so a
+        # transient model routing failure does not turn a current-information
+        # request into a false "no sources" answer.  Local requests are
+        # excluded above and are handled by the RAG recovery path instead.
+        if (
+            not cancelled
+            and not local_document_request
+            and force_web_search
+            and web_search_results
+            and not _source_urls(web_search_results)
+        ):
+            recovery_query = _web_recovery_query(web_request)
+            if recovery_query:
+                on_step(event="tool_start", name="web_search", args={"query": recovery_query})
+                recovery_result = _web_search_tool.web_search.invoke({"query": recovery_query})
+                recovery_ok = not recovery_result.startswith(("[error]", "[blocked]"))
+                on_step(event="tool_done", name="web_search", ok=recovery_ok)
+                if recovery_ok and _source_urls([recovery_result]):
+                    web_search_results = [recovery_result]
+                    last_tool_name, last_tool_result = "web_search", recovery_result
+                    forced_web_result = recovery_result
+
         duplicate_recovered = bool(
             duplicate_tool_call is not None
-            and last_tool_name == duplicate_tool_call.get("name")
-            and last_tool_name in {"bash", "rag_search"}
+            and last_tool_name == (
+                duplicate_tool_call.get("logical_name") or duplicate_tool_call.get("name")
+            )
+            and last_tool_name in {"bash", "rag_search", "local_search", "web_search"}
             and last_tool_result
         )
         if duplicate_tool_call is not None:
@@ -841,11 +1597,19 @@ def run_turn(
                 # identical call again is a completion failure, not a failed
                 # user operation. Stop the loop and surface the proven result.
                 final_text = f"พบผลลัพธ์จากการค้นหาดังนี้ครับ:\n\n{_strip_tool_reminder(last_tool_result or '')}"
+                if duplicate_tool_call.get("name") == "bash":
+                    final_text += (
+                        "\n\n[hint] bash command เดิมถูกบล็อกแล้ว; "
+                        "ถ้าจำเป็นต้องลองใหม่ ให้เปลี่ยน command หรือ scope อย่างชัดเจน"
+                    )
                 _log({"event": "duplicate_tool_completion_recovered", **duplicate_tool_call})
             else:
+                duplicate_name = duplicate_tool_call.get("logical_name") or duplicate_tool_call.get("name")
+                retry_subject = "command" if duplicate_name == "bash" else "query" if duplicate_name in {"web_search", "rag_search"} else "argument"
                 final_text = (
-                    "หยุดการทำงานเพื่อป้องกัน tool loop: โมเดลพยายามเรียกคำสั่งเดิมซ้ำโดยไม่เปลี่ยนวิธี "
-                    "กรุณาปรับคำค้นหรือขอบเขตแล้วลองใหม่"
+                    "หยุดการทำงานเพื่อป้องกัน tool loop: โมเดลเรียก tool เดิมด้วย "
+                    f"{retry_subject} เดิมซ้ำติดต่อกัน จึงถูกบล็อก "
+                    f"กรุณาเปลี่ยน {retry_subject} จริงก่อนลองใหม่"
                 )
         else:
             final_text = "" if cancelled else (
@@ -894,24 +1658,38 @@ def run_turn(
                                     retry_args, user_input, write_overwrite_gate_tripped,
                                 )
                                 tc["args"] = retry_args
+                                retry_logical_name = _logical_tool_name(tc["name"], retry_args)
+                                retry_call_id = str(tc.get("id") or "")
+                                if retry_call_id:
+                                    logical_tool_by_call_id[retry_call_id] = retry_logical_name
                                 if tc["name"] == "write_file":
                                     retry_emitted_write_call = True
                                 on_step(event="tool_start", name=tc["name"], args=retry_args)
                             if not tool_calls:
                                 final_msg = m
                         elif node_name == "tools":
-                            name = getattr(m, "name", None) or "?"
+                            raw_name = getattr(m, "name", None) or "?"
+                            call_id = str(getattr(m, "tool_call_id", "") or "")
+                            name = logical_tool_by_call_id.get(call_id, raw_name)
                             content = m.content if isinstance(m.content, str) else str(m.content)
-                            if name == "web_search":
+                            if name == "web_search" and not content.startswith("[blocked]"):
                                 web_search_results.append(content)
                             status = getattr(m, "status", None)
                             ok = status != "error" and not (
                                 content.startswith("[error]") or content.startswith("[blocked]")
                             )
-                            on_step(event="tool_done", name=name, ok=ok)
+                            on_step(event="tool_done", name=raw_name, ok=ok)
                             if ok:
                                 last_tool_name, last_tool_result = name, content
-                                if name in {"bash", "rag_search", "read_file", "read_image"}:
+                                if name == "rag_search" and first_rag_result is None:
+                                    first_rag_result = content
+                                if name == "rag_search":
+                                    rag_search_results.append(content)
+                                if name == "local_search":
+                                    local_search_results.append(content)
+                                    if first_local_search_result is None:
+                                        first_local_search_result = content
+                                if name in {"bash", "rag_search", "local_search", "read_file", "read_image"}:
                                     local_evidence_results.append(content)
             if not retry_emitted_write_call:
                 # The retry produced no actual write_file call, so the first
@@ -944,6 +1722,7 @@ def run_turn(
     # Exception paths do not create a completed tools-node update, but keep
     # the result shape stable for the terminal UI and programmatic callers.
     web_search_results = locals().get("web_search_results", [])
+    rag_search_results = locals().get("rag_search_results", [])
     last_tool_name = locals().get("last_tool_name")
     last_tool_result = locals().get("last_tool_result")
     tool_log = turn_guard.get_tool_log()
@@ -962,7 +1741,7 @@ def run_turn(
             # raw result directly instead of a content-free apology (same
             # "100% determinism -> code, not model synthesis" principle as
             # _append_source_citations).
-            if tool_calls == 1 and last_tool_name in ("bash", "rag_search") and last_tool_result:
+            if tool_calls == 1 and last_tool_name in ("bash", "rag_search", "local_search") and last_tool_result:
                 final_text = f"พบผลลัพธ์จากการค้นหาดังนี้ครับ:\n\n{_strip_tool_reminder(last_tool_result)}"
             else:
                 final_text = "ขออภัยครับ การประมวลผลคำตอบไม่สำเร็จ กรุณาถามคำถามเดิมอีกครั้ง"
@@ -973,7 +1752,30 @@ def run_turn(
         # replace it deterministically rather than showing it to the user.
         elif tool_calls and is_boilerplate_refusal(final_text):
             _log({"event": "boilerplate_refusal_caught", "text": final_text, "tools": tool_log})
-            final_text = _fallback_summary(tool_log)
+            web_fallback = _best_web_evidence(web_search_results)
+            if force_web_search and web_fallback:
+                # Do not surface the last [needs_retry] result after a useful
+                # source already survived the web quality gates.
+                web_search_results = [web_fallback]
+                final_text = (
+                    "ผลการค้นหาจากเว็บ:\n\n"
+                    f"{_strip_tool_reminder(web_fallback)}"
+                )
+                aborted = False
+            else:
+                final_text = _fallback_summary(tool_log, last_tool_name, last_tool_result)
+
+        # The model may produce a [needs_retry] sentence after a useful web
+        # result, even when it did not trigger the English-refusal guard above.
+        web_fallback = _best_web_evidence(web_search_results)
+        if (
+            force_web_search
+            and web_fallback
+            and final_text.lstrip().startswith("[needs_retry]")
+        ):
+            web_search_results = [web_fallback]
+            final_text = f"ผลการค้นหาจากเว็บ:\n\n{_strip_tool_reminder(web_fallback)}"
+            aborted = False
 
         # A preview of a large find/grep result is never the complete list.
         # Qwen2B live-observed the first 19 visible paths and claimed there
@@ -1014,40 +1816,80 @@ def run_turn(
             final_text = _append_source_citations(final_text, web_search_results)
 
         if not web_search_results:
-            if forced_whole_machine_result:
-                final_text = f"ผลการค้นหาทั้งเครื่อง:\n\n{_strip_tool_reminder(forced_whole_machine_result)}"
-                aborted = False
             # A successful project content fallback is already a complete,
             # grounded locator result. If the small model loops while trying
             # to summarize it, surface that result instead of the loop guard
             # message; this is the same deterministic completion principle as
             # the large-output bash fallback below.
+            local_result = first_local_search_result or first_rag_result
             if (
-                search_scope.is_project_scoped_query()
-                and first_rag_result
-                and _has_useful_project_rag_evidence(first_rag_result)
+                (
+                    local_document_request
+                    or rag_request
+                    or outside_rag_request
+                    or search_scope.is_project_scoped_query()
+                )
+                and local_result
+                and _has_useful_project_rag_evidence(local_result)
                 and (
                     aborted
                     or (
-                        first_rag_result.startswith("[ค้นจากเนื้อหาในโปรเจกต์ปัจจุบัน:")
+                        local_result.startswith("[ค้นจากเนื้อหาในโปรเจกต์ปัจจุบัน:")
                         and _is_project_no_result_answer(final_text)
                     )
+                    or (local_document_request and _is_project_no_result_answer(final_text))
+                    or (local_document_request and not final_text.strip())
+                    or (rag_request and _is_project_no_result_answer(final_text))
+                    or (rag_request and not final_text.strip())
+                    or (outside_rag_request and _is_project_no_result_answer(final_text))
+                    or (outside_rag_request and not final_text.strip())
                 )
             ):
-                final_text = f"ผลการค้นหาในโปรเจกต์ปัจจุบัน:\n\n{_strip_tool_reminder(first_rag_result)}"
+                if outside_rag_request:
+                    heading = "ผลการค้นหานอก Knowledge Base ด้วย bash:"
+                elif rag_fallback_scope == "knowledge":
+                    heading = "ผลการค้นหาใน Knowledge Base ด้วย bash:"
+                elif rag_fallback_scope == "project":
+                    heading = "ผลการค้นหาในโปรเจกต์ปัจจุบันด้วย bash:"
+                elif rag_fallback_scope == "local":
+                    heading = "ผลการค้นหาใน Desktop/Documents ด้วย bash:"
+                else:
+                    heading = (
+                        "ผลการค้นหาใน Desktop/Documents:"
+                        if first_local_search_result
+                        else (
+                            "ผลการค้นหาใน Knowledge Base:"
+                            if rag_request
+                            else "ผลการค้นหาในโปรเจกต์ปัจจุบัน:"
+                        )
+                    )
+                final_text = f"{heading}\n\n{_strip_tool_reminder(local_result)}"
                 aborted = False
             final_text = _ground_project_search_answer(
                 final_text, last_tool_name, last_tool_result,
             )
-            final_text = _restore_known_local_paths(final_text, first_rag_result)
+            final_text = _ground_local_fact_answer(
+                final_text, local_result, user_input,
+            )
+            final_text = _restore_known_local_paths(final_text, local_result)
             final_text = _strip_unsupported_local_numbers(
                 final_text, locals().get("local_evidence_results", []), user_input,
             )
-        elif forced_web_result:
+        elif forced_web_result and _source_urls([forced_web_result]):
             final_text = f"ผลการค้นหาจากเว็บ:\n\n{_strip_tool_reminder(forced_web_result)}"
             aborted = False
             if direct_image_path and image_ok:
                 final_text = _ground_image_text_answer(final_text, image_result, user_input)
+
+        # Like web citations, Knowledge Base provenance is code-owned.  Only
+        # attach RAG sources on a local/project turn; a mistaken RAG call in a
+        # current-information turn must not dilute the web-source contract.
+        if (
+            rag_search_results
+            and not _write_action_required(user_input)
+            and (local_document_request or not force_web_search)
+        ):
+            final_text = _append_rag_source_citations(final_text, rag_search_results)
 
         # Defense in depth: a tool or a vision-model response must not place a
         # credential-shaped string into the UI, history, or session log.
@@ -1073,9 +1915,5 @@ def run_turn(
         messages.extend(_compact_turn(injected_input, tool_log, final_text))
         trim_history(messages)
 
-    # Normal direct-VLM injection consumes snapshots itself.  This is the
-    # exception/finally layer for a graph that stopped before its next model
-    # call or had no HumanMessage to attach to.
-    _read_image_tool.discard_pending_images()
     return TurnResult(text=final_text, tool_calls=tool_calls, aborted=aborted, cancelled=cancelled,
                       web_search_results=web_search_results)

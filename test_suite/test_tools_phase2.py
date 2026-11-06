@@ -1,20 +1,37 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
 """No model needed — direct tool.run() tests for bash/read_file/write_file."""
-import sys, os, shlex
+import sys, os, json
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import config
 import subprocess
 import tempfile
+from pathlib import Path
 from tools import bash, read_file, write_file
 from helpers import turn_guard
 
 
-def test_lite_state_stays_within_workspect():
-    config.DATA_DIR.resolve().relative_to(config.WORKSPECT_DIR.resolve())
-    config.LOG_DIR.resolve().relative_to(config.WORKSPECT_DIR.resolve())
+def test_full_bash_output_is_atomic_private_and_retained_bounded(monkeypatch, tmp_path):
+    from helpers import save_output
+
+    monkeypatch.setattr(save_output, "_OUT_DIR", tmp_path)
+    path = save_output.save_full_output("hello\nworld\n", "bash/unsafe name")
+    assert path is not None
+    saved = Path(path)
+    assert saved.read_text(encoding="utf-8") == "hello\nworld\n"
+    assert saved.stat().st_mode & 0o777 == 0o600
+    assert "/" not in saved.name
+    assert not list(tmp_path.glob(".*.tmp"))
+
+
+def test_lite_state_stays_in_per_machine_runtime_root():
+    allowed = (config.DEFAULT_DATA_DIR.resolve(), config.WORKSPECT_DIR.resolve())
+    assert any(
+        path.resolve().is_relative_to(root)
+        for path in (config.DATA_DIR, config.LOG_DIR)
+        for root in allowed
+    )
+    if not os.getenv("LITE_DATA_DIR"):
+        assert config.DATA_DIR.resolve().is_relative_to(config.DEFAULT_DATA_DIR.resolve())
 
 
 def test_bash_safe_command():
@@ -72,7 +89,7 @@ def test_whole_machine_alignment_replaces_project_grep_with_mdfind():
 
 def test_project_alignment_replaces_sibling_root_but_preserves_agent_query():
     command = bash.normalize_command_for_query(
-        'grep -r -l "trigram tokenizer" /Users/halochampmac/Desktop/ENDEAVOR_AGENTIC/ENDEAVOR_LOCAL_AGENT_MAX_VLM',
+        'grep -r -l "trigram tokenizer" /Users/test/Desktop/example-project',
         "มีไฟล์ไหนในโปรเจกต์นี้พูดถึง trigram tokenizer บ้าง",
     )
     assert str(config.PROJECT_ROOT) in command
@@ -82,7 +99,7 @@ def test_project_alignment_replaces_sibling_root_but_preserves_agent_query():
 
 def test_filename_search_uses_spotlight_name_query_instead_of_broad_scan():
     command = bash.normalize_command_for_query(
-        'find /Users/halochampmac/Desktop -type f -iname "*คำสั่ง*"',
+        'find /Users/test/Desktop -type f -iname "*คำสั่ง*"',
         "ค้นหาไฟล์ในเครื่องที่มีชื่อว่าคำสั่ง",
     )
     assert command.startswith("mdfind ")
@@ -93,7 +110,7 @@ def test_filename_search_uses_spotlight_name_query_instead_of_broad_scan():
 
 def test_filename_alignment_preserves_agent_selected_term_without_user_phrase_parsing():
     command = bash.normalize_command_for_query(
-        'find /Users/halochampmac/Desktop -type f -name "*กล้อง*"',
+        'find /Users/test/Desktop -type f -name "*กล้อง*"',
         "ค้นหาไฟล์ในเครื่องที่ชื่อมีคำว่ากล้อง",
     )
     assert "kMDItemFSName" in command
@@ -185,6 +202,54 @@ def test_bash_blocks_sensitive_path_and_secret_shaped_output(tmp_path):
     assert bash.run({"command": f"cat {ordinary}"}).startswith("[blocked]")
 
 
+def test_bash_reads_source_code_with_token_assignment_expression(tmp_path):
+    source = tmp_path / "agent.py"
+    source.write_text("token = search_scope.set_request_query(user_input)\n")
+
+    out = bash.run({"command": f"cat {source} | head -100"})
+
+    assert out.strip() == "token = search_scope.set_request_query(user_input)"
+
+
+def test_bash_pipeline_propagates_missing_path_failure(tmp_path):
+    missing = tmp_path / "missing.py"
+
+    out = bash.run({"command": f"cat {missing} | head -100"})
+
+    assert out.startswith("[error] bash command ล้มเหลว:")
+    assert "path ไม่มีอยู่จริง" in out
+    assert str(missing) in out
+
+
+def test_bash_expands_read_only_file_glob(tmp_path):
+    source = tmp_path / "agent.py"
+    source.write_text("print('ok')\n")
+    (tmp_path / "notes.txt").write_text("not selected\n")
+
+    out = bash.run({"command": f"ls -1 {tmp_path}/*.py"})
+
+    assert str(source) in out
+    assert "notes.txt" not in out
+
+
+def test_bash_normalizes_safe_model_cd_and_stderr_redirect(tmp_path):
+    source = tmp_path / "agent.py"
+    source.write_text("token = search_scope.set_request_query(user_input)\n")
+
+    out = bash.run({"command": f"cd {tmp_path} && ls -1 *.py 2>/dev/null"})
+
+    assert out == str(source)
+
+
+def test_bash_normalizes_safe_model_cd_find_pipeline(tmp_path):
+    source = tmp_path / "agent.py"
+    source.write_text("print('ok')\n")
+
+    out = bash.run({"command": f"cd {tmp_path} && find . -name '*.py' 2>/dev/null"})
+
+    assert out == str(source)
+
+
 def test_secret_detector_catches_common_bare_token_formats():
     from helpers.sensitive_paths import contains_secret_content
     assert contains_secret_content("sk-" + "A" * 32)
@@ -198,13 +263,39 @@ def test_secret_detector_catches_common_bare_token_formats():
     assert contains_secret_content("sk-\n" + "A" * 32)
 
 
+def test_secret_detector_does_not_block_source_expression_but_keeps_literals():
+    from helpers.sensitive_paths import contains_secret_content, path_is_or_contains_secret
+    from pathlib import Path
+
+    expression = "token = search_scope.set_request_query(user_input)"
+    assert not contains_secret_content(expression)
+    assert contains_secret_content("token=abcdefghijklmnop")
+    assert contains_secret_content('API_KEY = "abcdefghijklmnop"')
+
+    source = Path(__file__).resolve().parents[1] / "agent.py"
+    assert not path_is_or_contains_secret(source)
+
+
+def test_read_file_accepts_model_json_string_for_paths(tmp_path):
+    source = tmp_path / "agent.py"
+    source.write_text("token = search_scope.set_request_query(user_input)\n")
+    turn_guard.reset("read source")
+
+    out = read_file.read_file.invoke({"paths": json.dumps([str(source)])})
+
+    assert out.strip() == "token = search_scope.set_request_query(user_input)"
+
+
 def test_bash_allows_git_read_only_subcommands():
+    import shlex
+
+    # Quote the clone path: a public checkout may live under a folder with spaces.
     out = bash.run({"command": f"git -C {shlex.quote(str(config.PROJECT_ROOT))} status --short"})
     assert not out.startswith("[blocked]")
 
 
 def test_bash_allows_rg_files_for_local_file_discovery():
-    out = bash.run({"command": f"rg --files {shlex.quote(str(config.WORKSPECT_DIR))}"})
+    out = bash.run({"command": f"rg --files {config.WORKSPECT_DIR}"})
     assert not out.startswith("[blocked]")
     assert "command not found" not in out
 
@@ -328,3 +419,33 @@ def test_write_file_roundtrip_and_overwrite_gate(tmp_path_factory=None):
 if __name__ == "__main__":
     import pytest
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+def test_bash_blocked_redirect_reports_reason_missing_path_and_runtime_hint():
+    missing = "/Users/__endeavor_lite_missing_user__/Desktop/example-project"
+    out = bash.run({"command": f"ls -la {missing} 2>/dev/null"})
+
+    assert out.startswith("[blocked] bash command ถูกบล็อก:")
+    assert "redirect" in out
+    assert f"path ที่อ้างไม่มีอยู่จริง: {missing}" in out
+    assert str(config.RUNTIME_HOME) in out
+    assert str(config.PROJECT_ROOT) in out
+    assert "macOS/BSD" in out if config.RUNTIME_OS == "Darwin" else True
+
+
+def test_bash_nonzero_missing_path_is_error_with_root_cause_and_runtime_hint():
+    missing = "/Users/__endeavor_lite_missing_user__/definitely-not-here"
+    out = bash.run({"command": f"ls -la {missing}"})
+
+    assert out.startswith("[error] bash command ล้มเหลว:")
+    assert f"path ไม่มีอยู่จริง: {missing}" in out
+    assert "[hint]" in out
+    assert str(config.RUNTIME_HOME) in out
+
+
+def test_bash_classifies_nested_macos_sandbox_as_runner_failure_not_file_denial():
+    raw = "sandbox-exec: sandbox_apply: Operation not permitted\n"
+    reason = bash._classify_bash_error(71, raw, "echo hello")
+    assert "sandbox-exec ชั้นใน" in reason
+    assert "command ยังไม่ได้ execute" in reason
+    assert "parent sandbox" in reason

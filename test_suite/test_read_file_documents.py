@@ -1,6 +1,3 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
 """Document extraction and bounded sampling for Lite read_file."""
 from __future__ import annotations
 

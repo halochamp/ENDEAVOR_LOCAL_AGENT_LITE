@@ -1,6 +1,3 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
 """ui.py — terminal UI, ported from ENDEAVOR_LOCAL_AGENT_MAX_VLM/ui_cli.py.
 
 MAX_VLM's version (572 lines) is a full-featured multi-mode CLI: skills,
@@ -70,6 +67,7 @@ _TOOL_LABELS = {
     "read_file": "Read",
     "write_file": "Write",
     "web_search": "Web Search",
+    "local_search": "Desktop/Documents Search",
     "rag_search": "File Search",
     "read_image": "Read Image",
 }
@@ -83,15 +81,13 @@ def print_header(model: str, tool_count: int) -> None:
     inner = WIDTH - 2
     bar = f" {C_DIM}{'═' * WIDTH}{R}"
     title_txt = "  ENDEAVOR AGENT LITE"
+    model_txt = f"  Model  {short}"
     pad_title = max(0, inner - len(title_txt))
-    model_prefix = "  Model  "
-    max_model_chars = max(1, inner - len(model_prefix))
-    display_model = short if len(short) <= max_model_chars else short[:max_model_chars - 1] + "…"
-    pad_model = max(0, max_model_chars - len(display_model))
+    pad_model = max(0, inner - len(model_txt))
     print()
     print(bar)
     print(f" {C_DIM}║{R}  {BOLD}\033[38;5;220mENDEAVOR AGENT LITE{R}{C_DIM}{'':>{pad_title - 20}}║{R}")
-    print(f" {C_DIM}║{R}{C_META}{model_prefix}{R}{BOLD}{C_AGENT}{display_model}{R}{C_DIM}{'':>{pad_model}}║{R}")
+    print(f" {C_DIM}║{R}  {C_META}Model  {R}{BOLD}{C_AGENT}{short}{R}{C_DIM}{'':>{pad_model - 8 - len(short)}}║{R}")
     print(bar)
     print(f"   {C_META}{tool_count} tools{R}  {C_META}via mlx_vlm.server{R}")
     print()
@@ -193,12 +189,61 @@ def index_progress_text(path, stats: dict[str, int]) -> str:
     )
 
 
+def sync_kb_progress_text(event: str, path, stats: dict[str, int | float]) -> str:
+    """Render the non-LLM Knowledge Base sync phase and estimated progress."""
+    percent = float(stats.get("progress_percent", 0) or 0)
+    total = int(stats.get("total_files", 0) or 0)
+    completed = int(stats.get("completed_files", 0) or 0)
+    eta = float(stats.get("estimated_remaining_seconds", 0) or 0)
+    current = str(path) if path is not None else ""
+    if len(current) > 42:
+        current = "…" + current[-41:]
+    if event == "prepare":
+        return "กำลังรวบรวมรายการไฟล์ Knowledge Base…"
+    if event == "prepared":
+        return f"พบ {total:,} ไฟล์ · เริ่ม sync · ประมาณ 0%"
+    if event == "file":
+        detail = f"กำลังอ่าน/วิเคราะห์ {current or 'ไฟล์ถัดไป'}"
+    elif event == "result":
+        detail = f"กำลังบันทึกผล {current or 'ไฟล์ล่าสุด'}"
+    elif event == "cleanup":
+        detail = f"กำลังเก็บกวาดรายการเก่า {current or ''}".rstrip()
+    elif event == "semantic":
+        detail = "กำลังสร้าง semantic vectors"
+    elif event == "done":
+        return (
+            f"sync เสร็จ · 100% · {completed:,}/{total:,} ไฟล์ · "
+            f"{int(stats.get('documents', 0) or 0):,} documents"
+        )
+    else:
+        detail = "กำลังเตรียม SQLite…"
+    progress = f"ประมาณ {percent:.0f}%"
+    counts = f"{completed:,}/{total:,} ไฟล์"
+    remaining = f" · เหลือ ~{eta:.1f}s" if eta > 0 else ""
+    return f"{detail} · {progress} · {counts}{remaining}"
+
+
 def print_index_summary(stats: dict[str, int]) -> None:
     print(
         f"\n {C_AGENT}✓ สร้าง RAG index เสร็จ{R}  "
         f"{stats['scanned']:,} scanned · {stats['inserted']:,} new · "
         f"{stats['updated']:,} updated · {stats['skipped']:,} skipped · "
         f"{stats['error']:,} errors · {stats['seconds']:.2f}s"
+    )
+
+
+def print_sync_kb_summary(stats: dict[str, int]) -> None:
+    """Render the knowledge-root -> chunk-level SQLite sync result."""
+    print(
+        f"\n {C_AGENT}✓ sync_kb เสร็จ{R}  "
+        f"source {stats.get('raw_scanned', 0):,} ไฟล์ · "
+        f"index {stats.get('indexed', 0):,} · "
+        f"ไม่เปลี่ยน {stats.get('unchanged', 0):,} · "
+        f"ลบ {stats.get('removed', 0):,} · "
+        f"documents {stats.get('documents', 0):,} · chunks {stats.get('chunks', 0):,} · "
+        f"SQLite {stats.get('inserted', 0):,} new/{stats.get('updated', 0):,} updated · "
+        f"errors {stats.get('sync_errors', 0):,} · "
+        f"{stats.get('seconds', 0):.2f}s"
     )
 
 

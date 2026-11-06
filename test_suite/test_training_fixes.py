@@ -1,6 +1,3 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
 """No model needed — unit tests for the 2026-07-23 training-round fixes:
 date injection, param-alias correction, degenerate-repetition detection."""
 import sys, os
@@ -75,7 +72,7 @@ def test_is_degenerate_repetition_false_on_normal_text():
 
 
 def test_is_degenerate_repetition_false_on_distinct_absolute_path_list():
-    root = "/Users/example/Desktop/ENDEAVOR_AGENTIC/ENDEAVOR_AGENT_LITE/"
+    root = "/Users/example/Desktop/ENDEAVOR_AGENT_LITE/"
     text = "\n".join(f"{i}. `{root}module_{i:02d}.py`" for i in range(12))
     assert is_degenerate_repetition(text) is False
 

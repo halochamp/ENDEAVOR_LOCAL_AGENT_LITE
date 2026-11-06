@@ -1,6 +1,3 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
 """Live HTML-WebSocket first-token check; requires UI and model servers."""
 from __future__ import annotations
 

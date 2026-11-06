@@ -1,6 +1,3 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
 """guardrails.py — code-level safety net for a small model's agent loop.
 
 Rationale (see PLAN.md §6): live testing on Qwen3.5-2B-OptiQ-4bit showed it
@@ -29,6 +26,7 @@ class RepeatCallGuard:
 
     max_repeats: int = 2
     _counts: dict[str, int] = field(default_factory=dict)
+    _last_hash: str | None = None
 
     def check(self, tool_name: str, args: dict[str, str]) -> str | None:
         """Register this call attempt. Returns a Thai feedback string if the
@@ -36,9 +34,27 @@ class RepeatCallGuard:
         None if it's fine to run.
         """
         h = _call_hash(tool_name, args)
+        # For command/query tools the safety rule is specifically about an
+        # unchanged call being issued consecutively.  A genuinely different
+        # command/query starts a fresh retry sequence; this lets the agent
+        # make a later, materially different attempt without inheriting an
+        # old warning.
+        if tool_name in {"bash", "web_search"} and self._last_hash != h:
+            self._counts[h] = 0
+        self._last_hash = h
         self._counts[h] = self._counts.get(h, 0) + 1
         count = self._counts[h]
         if count == 2:
+            if tool_name == "bash":
+                return (
+                    "bash ถูกเรียกด้วย command เดิมติดต่อกัน ห้ามรันซ้ำแบบเดิม "
+                    "ให้เปลี่ยน command จริง เช่น จำกัด scope หรือเปลี่ยน pattern ก่อนลองใหม่"
+                )
+            if tool_name == "web_search":
+                return (
+                    "web_search ถูกเรียกด้วย query เดิมติดต่อกัน ห้ามรันซ้ำแบบเดิม "
+                    "ให้เปลี่ยน query จริง เช่น เพิ่มหัวข้อ พื้นที่ หรือช่วงเวลา ก่อนลองใหม่"
+                )
             return (
                 f"คำสั่งนี้ ({tool_name}) เพิ่งล้มเหลว/ไม่ได้ผลไปแล้ว ห้ามรันซ้ำแบบเดิม "
                 f"ให้เปลี่ยนวิธี เช่น จำกัด scope ให้แคบลง แก้คำค้น หรือถ้าไม่มีทางอื่นให้สรุปบอกผู้ใช้ตรงๆ ว่าหาไม่เจอ"
@@ -49,6 +65,7 @@ class RepeatCallGuard:
 
     def reset(self) -> None:
         self._counts.clear()
+        self._last_hash = None
 
 
 def is_degenerate_repetition(text: str, chunk_len: int = 12, min_repeats: int = 4) -> bool:

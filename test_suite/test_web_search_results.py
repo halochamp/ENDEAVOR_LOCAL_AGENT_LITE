@@ -1,74 +1,29 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
 """Quality gates for DDGS results before Lite cites them to users."""
 import sys
 from types import SimpleNamespace
-
-import pytest
 
 from tools import web_search
 import config
 
 
-@pytest.fixture(autouse=True)
-def _disable_live_semantic_filter(monkeypatch):
-    """Unit tests never make a resident-model call unless explicitly testing it."""
-    monkeypatch.setattr(config, "WEB_SEARCH_SEMANTIC_FILTER", False)
-
-
-def test_default_search_breadth_is_ten_results_and_four_sources():
+def test_default_search_breadth_is_ten_results_and_three_sources():
     assert config.WEB_SEARCH_MAX_RESULTS == 10
-    assert config.WEB_SEARCH_FETCH_TOP == 4
+    assert config.WEB_SEARCH_FETCH_TOP == 3
 
 
-def test_semantic_decision_parser_accepts_only_numbered_yes_no_lines():
-    assert web_search._parse_semantic_decisions(
-        "1 YES\n2 NO\n3 YES", 3,
-    ) == {0, 2}
-    assert web_search._parse_semantic_decisions("explanation only", 2) is None
+def test_freshness_classification_uses_real_markers_not_substrings():
+    assert web_search._is_time_sensitive("ราคาทองปัจจุบัน") is True
+    assert web_search._query_timelimit("ราคาทองปัจจุบัน") == "w"
+    assert web_search._is_news_query("newspaper history") is False
+    assert web_search._is_news_query("newsletter software") is False
+    assert web_search._query_timelimit("newspaper history") is None
+    assert web_search._query_timelimit("todayish product name") is None
+    assert web_search._query_timelimit("latest AI news") == "w"
+    assert web_search._news_core_variant("latest Snowflake news") == "Snowflake news"
+    assert web_search._news_core_variant("news about Snowflake") == "about Snowflake"
 
 
-def test_semantic_filter_batches_results_and_rejects_intent_mismatch(monkeypatch):
-    monkeypatch.setattr(config, "WEB_SEARCH_SEMANTIC_FILTER", True)
-    captured = {}
-
-    class _FakeModel:
-        def invoke(self, messages):
-            captured["prompt"] = messages[-1].content
-            return SimpleNamespace(content="1 NO\n2 YES")
-
-    monkeypatch.setattr(web_search, "_semantic_filter_model", lambda: _FakeModel())
-    results = [
-        {
-            "title": "Bitcoin Halving คืออะไร",
-            "snippet": "บทความเกี่ยวกับวงจร Halving",
-            "url": "https://crypto.test/halving",
-        },
-        {
-            "title": "Bitcoin Price Today",
-            "snippet": "Live Bitcoin price and market data",
-            "url": "https://market.test/bitcoin",
-        },
-    ]
-
-    selected = web_search._semantic_reject_irrelevant(results, "ราคา Bitcoin วันนี้")
-
-    assert selected == [results[1]]
-    assert "crypto.test" not in captured["prompt"]
-    assert "Bitcoin Halving" in captured["prompt"]
-
-
-def test_run_calls_semantic_llm_once_for_the_whole_candidate_batch(monkeypatch):
-    monkeypatch.setattr(config, "WEB_SEARCH_SEMANTIC_FILTER", True)
-    calls = []
-
-    class _FakeModel:
-        def invoke(self, messages):
-            calls.append(messages[-1].content)
-            return SimpleNamespace(content="1 YES\n2 NO\n3 YES")
-
-    monkeypatch.setattr(web_search, "_semantic_filter_model", lambda: _FakeModel())
+def test_run_selects_top_three_ranked_sources_without_model_call(monkeypatch):
     monkeypatch.setattr(web_search, "_search_engines", lambda *_args: [
         {
             "title": "Bitcoin Price Today — Market A",
@@ -89,10 +44,9 @@ def test_run_calls_semantic_llm_once_for_the_whole_candidate_batch(monkeypatch):
 
     output = web_search.run({"query": "ราคา Bitcoin วันนี้"})
 
-    assert len(calls) == 1
-    assert all(name in calls[0] for name in ("Market A", "Market B", "Market C"))
+    assert "_semantic_filter_model" not in vars(web_search)
     assert "market-a.test" in output
-    assert "market-b.test" not in output
+    assert "market-b.test" in output
     assert "market-c.test" in output
 
 
@@ -144,6 +98,7 @@ def test_run_tries_bounded_simplified_subject_variant(monkeypatch):
     assert calls == [
         "อัตราดอกเบี้ยนโยบายไทยล่าสุด 2569",
         "อัตราดอกเบี้ยนโยบายไทย 2569",
+        'site:bot.or.th "อัตราดอกเบี้ยนโยบาย"',
     ]
     assert "central-bank.test/policy-rate" in output
     assert "economy.test/policy-rate" in output
@@ -320,6 +275,61 @@ def test_search_engine_fallback_runs_when_first_backend_is_irrelevant(monkeypatc
     assert len(results) == 3
 
 
+def test_time_filtered_empty_search_retries_once_without_filter_and_marks_result(monkeypatch):
+    calls = []
+
+    class _FakeDDGS:
+        def __init__(self, **_kwargs):
+            pass
+
+        def text(self, _query, *, max_results, region, backend, timelimit=None):
+            calls.append((backend, timelimit))
+            if timelimit:
+                return []
+            return [
+                {
+                    "title": "Thailand policy interest rate current",
+                    "body": "Current Thailand policy interest rate decision",
+                    "href": "https://central-bank.test/rate",
+                },
+                {
+                    "title": "Thailand policy interest rate current analysis",
+                    "body": "Thailand policy interest rate overview",
+                    "href": "https://economy.test/rate",
+                },
+            ]
+
+    monkeypatch.setitem(sys.modules, "ddgs", SimpleNamespace(DDGS=_FakeDDGS))
+
+    results = web_search._search_engines("current Thailand policy interest rate", "us-en")
+
+    assert calls == [("duckduckgo", "w"), ("bing", "w"), ("duckduckgo", None)]
+    assert isinstance(results, list)
+    assert all(row["_freshness_relaxed"] for row in results)
+
+
+def test_relaxed_freshness_is_disclosed_with_source_urls(monkeypatch):
+    monkeypatch.setattr(web_search, "_search_engines", lambda *_args: [
+        {
+            "title": "Thailand policy interest rate current",
+            "body": "Current Thailand policy interest rate decision",
+            "href": "https://central-bank.test/rate",
+            "_freshness_relaxed": True,
+        },
+        {
+            "title": "Thailand policy interest rate current analysis",
+            "body": "Thailand policy interest rate overview",
+            "href": "https://economy.test/rate",
+            "_freshness_relaxed": True,
+        },
+    ])
+
+    output = web_search.run({"query": "current Thailand policy interest rate"})
+
+    assert output.startswith("[freshness_relaxed]")
+    assert "[source: https://central-bank.test/rate]" in output
+
+
 def test_news_results_require_recent_backend_date(monkeypatch):
     now = web_search.datetime.now(web_search.timezone.utc)
     monkeypatch.setattr(web_search, "_search_news", lambda *_args: [
@@ -455,3 +465,178 @@ def test_current_fact_query_rejects_forecast_article(monkeypatch):
 
     assert output.startswith("[needs_retry]")
     assert "forecast.test" not in output
+
+
+def test_multi_query_runs_four_searches_in_parallel_and_keeps_one_source_each(monkeypatch):
+    import threading
+
+    barrier = threading.Barrier(4)
+    search_done = []
+    queries = ["alpha revenue", "beta margin", "gamma guidance", "delta capex"]
+
+    def fake_search_one(query):
+        barrier.wait(timeout=2)
+        search_done.append(query)
+        idx = queries.index(query)
+        return {
+            "query": query,
+            "quality_query": query,
+            "message": "",
+            "candidates": [{
+                "title": f"Result {idx + 1} for {query}",
+                "snippet": f"snippet about {query}",
+                "url": f"https://source-{idx + 1}.test/article",
+                "date": None,
+                "_query": query,
+                "_quality_query": query,
+            }],
+        }
+
+    fetched = []
+
+    def fake_fetch(urls):
+        assert len(search_done) == 4
+        fetched.extend(urls)
+        return {
+            "https://source-1.test/article": "Unrelated navigation\n\nAlpha revenue reached 100 million.",
+            "https://source-2.test/article": "Beta margin is 20 percent.\n\nOther material.",
+            "https://source-3.test/article": "Gamma guidance calls for 12 percent growth.\n\nOther material.",
+            "https://source-4.test/article": "Delta capex is 8 billion.\n\nOther material.",
+        }
+
+    monkeypatch.setattr(web_search, "_search_candidates_for_query", fake_search_one)
+    monkeypatch.setattr(web_search, "_fetch_batch", fake_fetch)
+
+    output = web_search.run({"query": queries})
+
+    assert fetched == [
+        "https://source-1.test/article",
+        "https://source-2.test/article",
+        "https://source-3.test/article",
+        "https://source-4.test/article",
+    ]
+    assert "source-2.test" in output
+    assert "Alpha revenue reached 100 million" in output
+    assert "Beta margin is 20 percent" in output
+    assert "Gamma guidance calls for 12 percent growth" in output
+    assert "Delta capex is 8 billion" in output
+    assert "Unrelated navigation" not in output
+    assert "source-4.test" in output
+
+
+def test_multi_query_rejects_more_than_four_and_schemas_expose_array_form():
+    result = web_search.run({"query": ["a", "b", "c", "d", "e"]})
+    assert "สูงสุด 4" in result
+
+    manual_query = web_search.SCHEMA["function"]["parameters"]["properties"]["query"]
+    assert manual_query["oneOf"][1]["maxItems"] == 4
+    lc_query = web_search.web_search.args_schema.model_json_schema()["properties"]["query"]
+    assert "array" in str(lc_query).lower()
+
+
+def test_json_list_query_string_is_accepted_and_deduplicated():
+    queries, error = web_search._coerce_query_batch('["alpha", "beta", "alpha"]')
+    assert error is None
+    assert queries == ["alpha", "beta"]
+
+
+def test_fetched_body_with_no_query_match_falls_back_to_search_snippet():
+    result = {
+        "title": "Policy rate",
+        "snippet": "Current policy rate evidence",
+        "url": "https://example.test/rate",
+        "_query": "policy rate",
+    }
+    summary = web_search._result_summary(result, "Navigation menu only\n\nContact us")
+    assert "Current policy rate evidence" in summary
+    assert "Navigation menu" not in summary
+
+
+def test_langchain_web_search_accepts_native_query_list(monkeypatch):
+    from helpers import turn_guard
+
+    def fake_search_one(query):
+        return {
+            "query": query,
+            "quality_query": query,
+            "message": "",
+            "candidates": [{
+                "title": f"{query} source",
+                "snippet": f"evidence for {query}",
+                "url": f"https://{query.split()[0]}.test/source",
+                "date": None,
+                "_query": query,
+                "_quality_query": query,
+            }],
+        }
+
+    monkeypatch.setattr(web_search, "_search_candidates_for_query", fake_search_one)
+    monkeypatch.setattr(web_search, "_fetch_batch", lambda _urls: {})
+    turn_guard.reset("web-search-list-invoke")
+
+    output = web_search.web_search.invoke({"query": ["alpha revenue", "beta margin"]})
+
+    assert "[query:alpha revenue]" in output
+    assert "[query:beta margin]" in output
+    assert "alpha.test/source" in output
+    assert "beta.test/source" in output
+
+
+def test_four_query_batch_reserves_at_least_one_source_per_query(monkeypatch):
+    queries = ["alpha topic", "beta topic", "gamma topic", "delta topic"]
+
+    def fake_search_one(query):
+        return {
+            "query": query,
+            "quality_query": query,
+            "message": "",
+            "candidates": [{
+                "title": f"{query} source",
+                "snippet": f"evidence for {query}",
+                "url": f"https://{query.split()[0]}.test/source",
+                "date": None,
+                "_query": query,
+                "_quality_query": query,
+            }],
+        }
+
+    fetched = []
+    monkeypatch.setattr(web_search, "_search_candidates_for_query", fake_search_one)
+    monkeypatch.setattr(web_search, "_fetch_batch", lambda urls: fetched.extend(urls) or {})
+
+    output = web_search.run({"query": queries})
+
+    assert fetched == [
+        "https://alpha.test/source",
+        "https://beta.test/source",
+        "https://gamma.test/source",
+        "https://delta.test/source",
+    ]
+    for query in queries:
+        assert f"[query:{query}]" in output
+        assert f"https://{query.split()[0]}.test/source" in output
+
+
+def test_ranked_result_fetches_page_without_semantic_model(monkeypatch):
+    monkeypatch.setattr(web_search, "_search_candidates_for_query", lambda query: {
+        "query": query,
+        "quality_query": query,
+        "message": "",
+        "candidates": [{
+            "title": "Alpha revenue source",
+            "snippet": "Alpha revenue snippet evidence",
+            "url": "https://alpha.test/source",
+            "date": None,
+            "_query": query,
+            "_quality_query": query,
+        }],
+    })
+
+    fetched = []
+    monkeypatch.setattr(web_search, "_fetch_batch", lambda urls: fetched.extend(urls) or {})
+
+    output = web_search.run({"query": "alpha revenue"})
+
+    assert fetched == ["https://alpha.test/source"]
+    assert "Alpha revenue snippet evidence" in output
+    assert "alpha.test/source" in output

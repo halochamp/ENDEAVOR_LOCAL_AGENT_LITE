@@ -1,6 +1,3 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
 """PLAN.md §9.3 vision-cache-size A/B harness (manual, requires a live
 mlx_vlm.server -- not collected by pytest, no `test_` prefix).
 

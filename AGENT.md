@@ -20,6 +20,7 @@ The main invariants are:
 - sensitive paths/content stay protected;
 - heavy ML dependencies load lazily;
 - low-memory behavior is part of correctness;
+- document RAG is separated behind the bundled standalone `MCP-RagDoc/` boundary;
 - tool routing and guardrails are verified deterministically where possible; and
 - live-model behavior is tested separately from deterministic code.
 

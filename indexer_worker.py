@@ -1,6 +1,3 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
 """Standalone child-process entry point for indexer.build_index (PLAN.md
 §9.2). web_ui.py spawns this as a short-lived subprocess instead of running
 build_index() in-thread inside the always-on UI process.
@@ -22,10 +19,11 @@ browser without holding more than the current line in memory either.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
-import indexer
+import rag_mcp_service
 
 
 def _emit(event: str, path: Path | None, stats: dict) -> None:
@@ -37,10 +35,24 @@ def _emit(event: str, path: Path | None, stats: dict) -> None:
 
 
 def main() -> None:
-    # build_index() itself emits a final on_progress("done", None, stats)
-    # call once stats["seconds"] is set -- that line carries the complete
-    # summary the parent needs, no separate final emit required here.
-    indexer.build_index(verbose=False, on_progress=_emit)
+    # /sync_kb owns the complete knowledge-root -> streaming chunks -> SQLite flow.
+    # Keep the old plain index mode for deterministic developer/test callers,
+    # but the browser's knowledge command always takes the explicit flag.
+    if "--sync-kb" in sys.argv[1:]:
+        # The UI shortcut and MCP sync_kb share this exact service boundary.
+        # kb_sync underneath emits the authoritative final "done" event.
+        rag_mcp_service.sync_kb(on_progress=_emit)
+        return
+
+    # Retain the old environment override for isolated test corpora and
+    # one-off developer runs. Normal Lite startup has no such variable and
+    # therefore indexes only config.INDEX_ROOTS (rag_document/md).
+    configured = os.getenv("LITE_INDEX_ROOTS")
+    roots = [Path(item).expanduser() for item in configured.split(",") if item.strip()] if configured else None
+    # Legacy /index writes the same SQLite file as /sync_kb.  Route it through
+    # the shared exclusive lock so an external MCP/UI sync cannot interleave
+    # schema changes or FTS writes with this compatibility job.
+    rag_mcp_service.index_legacy(roots=roots, verbose=False, on_progress=_emit)
 
 
 if __name__ == "__main__":
