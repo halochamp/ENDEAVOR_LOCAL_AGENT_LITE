@@ -182,7 +182,10 @@ python -m pytest test_suite -q
 
 ## License
 
-Released under the [MIT License](LICENSE).
+MIT License + Commons Clause — see [LICENSE](LICENSE).
+
+ใช้ส่วนตัวและเพื่อการเรียนรู้ได้อย่างอิสระ
+ห้ามนำไปใช้เชิงพาณิชย์โดยไม่ได้รับอนุญาตจากผู้พัฒนา
 
 ## ผู้พัฒนา
 
