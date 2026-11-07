@@ -7,7 +7,9 @@ on:
 
 jobs:
   test:
-    runs-on: macos-14
+    # macos-14 stopped being supported by GitHub-hosted runners (jobs were cancelled
+    # with "configuration macos-14-arm64-us-default is not supported").
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
