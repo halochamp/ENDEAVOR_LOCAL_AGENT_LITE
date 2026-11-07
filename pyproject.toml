@@ -13,7 +13,9 @@ dependencies = [
     "langchain-openai",
     "langgraph",
     "mlx-vlm",
-    "mcp>=1.0",
+    # mcp 2.x removed mcp.server.fastmcp (renamed MCPServer); MCP-RagDoc/rag_server.py
+    # and tools/mcp_client.py are written for the 1.x API.
+    "mcp>=1.0,<2",
     "numpy",
     "opencv-python",
     "openpyxl",
