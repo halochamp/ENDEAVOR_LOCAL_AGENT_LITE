@@ -1,13 +1,19 @@
 """test_agent_live.py — Phase 5 live verification (PLAN.md §7 Phase 5 table).
 
-Needs the real model loaded and (for scenario 3) network access. Not a
+Needs the real model loaded and (for the web scenario) network access. Not a
 pytest-asserts suite — model output is non-deterministic enough that hard
 asserts on wording would be flaky. Instead this runs each scenario, prints
 the full transcript, and scores it against the pass criterion so a human
 (or the checkpoint log) can see exactly why something failed.
 
+Fixtures (all under workspect/, never the user's real Desktop/Documents/KB):
+  kb/     isolated Knowledge Base, synced before the run; read by the MCP rag tools
+  local/  stands in for Desktop/Documents (config.LOCAL_SEARCH_ROOTS)
+The two document-content scenarios use different topics and numbers so a pass
+shows which route (Knowledge Base vs local_search) actually answered.
+
 Run directly: `python test_suite/test_agent_live.py`
-Pass bar (PLAN.md): >= 5/6 scenarios, peak RAM across the whole session < 4GB.
+Pass bar: all scenarios but at most one, peak RAM across the whole session < 4GB.
 """
 from __future__ import annotations
 import sys
@@ -21,7 +27,13 @@ import subprocess
 
 import agent
 import config
-import indexer
+
+# config values redirected to the isolated fixtures for the whole run.
+_PATCHED = (
+    "KNOWLEDGE_DIR", "KNOWLEDGE_SOURCE_DIR", "KNOWLEDGE_RAW_DIR", "RAW_DIR",
+    "KNOWLEDGE_MD_DIR", "MD_DIR", "DATA_DIR", "FILE_INDEX_DB", "INDEX_ROOTS",
+    "LOCAL_SEARCH_ROOTS", "SEMANTIC_ENABLED",
+)
 
 RESULTS: list[tuple[str, bool, str]] = []
 PEAK_MEM_MB = 0.0
@@ -88,24 +100,48 @@ def main() -> None:
     global LIVE_CORPUS
     _create_image_fixture()
     LIVE_CORPUS = tempfile.TemporaryDirectory(prefix="lite-live-docs-", dir=config.WORKSPECT_DIR)
-    corpus = Path(LIVE_CORPUS.name)
-    (corpus / "หนังสือแจ้งต่ออายุประกัน.txt").write_text(
+    root = Path(LIVE_CORPUS.name)
+    kb, state, local = root / "kb", root / "state", root / "local"
+    for directory in (kb / "md", state, local):
+        directory.mkdir(parents=True)
+    (kb / "หนังสือแจ้งต่ออายุประกัน.txt").write_text(
         "กรมธรรม์ต่ออายุวันที่ 30 กันยายน 2569 เบี้ยประกัน 12,500 บาท",
         encoding="utf-8",
     )
-    (corpus / "เงื่อนไขสัญญาเช่า.txt").write_text(
+    (kb / "เงื่อนไขสัญญาเช่า.txt").write_text(
         "ผู้เช่าต้องแจ้งล่วงหน้า 30 วัน ค่าปรับยกเลิกสัญญา 8,000 บาท",
         encoding="utf-8",
     )
-    real_index = config.FILE_INDEX_DB
-    real_index_roots = config.INDEX_ROOTS
-    config.FILE_INDEX_DB = corpus / "live-index.sqlite3"
-    # The live path now crosses the MCP stdio process boundary.  Keep the
-    # fixture's source scope explicit so the child can validate returned paths
-    # against the same corpus as the parent indexer.
-    config.INDEX_ROOTS = [corpus]
-    indexer.build_index([corpus], verbose=False)
+    (local / "ใบแจ้งค่าธรรมเนียมโอน.txt").write_text(
+        "ค่าธรรมเนียมการโอนกรรมสิทธิ์ 15,000 บาท ชำระภายใน 7 วัน",
+        encoding="utf-8",
+    )
+    saved = {name: getattr(config, name) for name in _PATCHED}
+    # Redirect the Knowledge Base and local-search scope to the fixtures. The MCP
+    # stdio child receives the KB/state/index paths from the parent's config via
+    # mcp_client._server_environment() (they must live under workspect/). Semantic
+    # retrieval stays off: these scenarios test routing, not embedding quality, and
+    # it keeps the run's memory bounded.
+    config.KNOWLEDGE_DIR = config.KNOWLEDGE_SOURCE_DIR = config.KNOWLEDGE_RAW_DIR = kb
+    config.RAW_DIR = kb
+    config.KNOWLEDGE_MD_DIR = config.MD_DIR = kb / "md"
+    config.DATA_DIR = state
+    config.FILE_INDEX_DB = state / "file_index.sqlite3"
+    config.INDEX_ROOTS = [kb / "md"]
+    config.LOCAL_SEARCH_ROOTS = (local,)
+    config.SEMANTIC_ENABLED = False
+    rag_server_cfg = config.MCP_SERVERS["lite-rag"]
+    saved_args = list(rag_server_cfg["args"])
+    saved_write_paths = list(rag_server_cfg.get("sandbox_write_paths") or [])
+    rag_server_cfg["args"] = [*saved_args, "--semantic", "off"]
+    # The stdio child is sandboxed to write only under sandbox_write_paths (the real
+    # DATA_DIR at import time); the fixture state dir must be allowed explicitly.
+    rag_server_cfg["sandbox_write_paths"] = [str(state)]
     try:
+        import rag_mcp_service
+
+        stats = rag_mcp_service.sync_kb()
+        assert stats["inserted"] == 2, f"fixture KB sync failed: {stats}"
         scenario(
             "1. find document by name",
             "หนังสือแจ้งต่ออายุประกัน.txt อยู่ที่ไหน แล้วสรุปวันต่ออายุและเบี้ยประกัน",
@@ -117,15 +153,23 @@ def main() -> None:
             ),
         )
         scenario(
-            "2. find document by content",
-            "เอกสารไหนพูดถึงค่าปรับยกเลิกสัญญา และค่าปรับเท่าไร",
+            "2. find document by content (Knowledge Base)",
+            "ค้นใน Knowledge Base: เอกสารไหนพูดถึงค่าปรับยกเลิกสัญญา และค่าปรับเท่าไร",
             lambda r, m: (
                 "8,000" in r.text.replace("8000", "8,000") and r.tool_calls > 0,
-                "ต้องค้นเนื้อหาเอกสารและรายงานค่าปรับ 8,000 บาท",
+                "ต้องค้นเนื้อหาใน Knowledge Base และรายงานค่าปรับ 8,000 บาท",
             ),
         )
         scenario(
-            "3. web search + citation",
+            "3. find document by content (Desktop/Documents, local_search)",
+            "ในเครื่องของผม (Desktop หรือ Documents) มีเอกสารไหนพูดถึงค่าธรรมเนียมการโอนกรรมสิทธิ์ และเท่าไร",
+            lambda r, m: (
+                "15,000" in r.text.replace("15000", "15,000") and r.tool_calls > 0,
+                "ต้องค้นเนื้อหาไฟล์ในเครื่องและรายงานค่าธรรมเนียม 15,000 บาท",
+            ),
+        )
+        scenario(
+            "4. web search + citation",
             "ช่วยค้นหาอัตราดอกเบี้ยนโยบายไทยล่าสุด พร้อมแนบแหล่งที่มา",
             lambda r, m: (
                 ("http://" in r.text or "https://" in r.text) and r.tool_calls > 0,
@@ -133,12 +177,12 @@ def main() -> None:
             ),
         )
         scenario(
-            "4. chit-chat, no tool",
+            "5. chit-chat, no tool",
             "สวัสดีครับ",
             lambda r, m: (r.tool_calls == 0, "ไม่ควรเรียก tool สำหรับคำทักทาย"),
         )
         scenario(
-            "5. tool failure, no infinite loop",
+            "6. tool failure, no infinite loop",
             "อ่านไฟล์ /tmp/nonexistent_absolutely_not_real_path_xyz_ghost.txt ให้หน่อย",
             lambda r, m: (
                 not r.aborted or "หลายวิธี" in r.text or "ขั้นตอนสูงสุด" in r.text,
@@ -146,7 +190,7 @@ def main() -> None:
             ),
         )
         scenario(
-            "6. read image",
+            "7. read image",
             f"อ่านรูปนี้ให้หน่อย {LIVE_IMAGE} มีข้อความอะไรบ้าง",
             lambda r, m: (
                 r.tool_calls > 0 and any(term in r.text for term in ("4500", "THB", "ใบเสร็จ", "Invoice")),
@@ -154,14 +198,17 @@ def main() -> None:
             ),
         )
     finally:
-        config.FILE_INDEX_DB = real_index
-        config.INDEX_ROOTS = real_index_roots
+        rag_server_cfg["args"] = saved_args
+        rag_server_cfg["sandbox_write_paths"] = saved_write_paths
+        for name, value in saved.items():
+            setattr(config, name, value)
 
     print(f"\n{'='*70}\nSUMMARY\n{'='*70}")
     passed = sum(1 for _, ok, _ in RESULTS if ok)
+    bar = len(RESULTS) - 1
     for name, ok, reason in RESULTS:
         print(f"  [{'PASS' if ok else 'FAIL'}] {name} — {reason}")
-    print(f"\n{passed}/{len(RESULTS)} passed (bar: >=5/6)")
+    print(f"\n{passed}/{len(RESULTS)} passed (bar: >={bar}/{len(RESULTS)})")
     print(f"mlx_vlm.server peak footprint: {PEAK_MEM_MB:.0f} MB ({PEAK_MEM_MB/1024:.3f} GB) "
           f"— standing server process, not a per-session in-process budget anymore")
     LIVE_IMAGE.unlink(missing_ok=True)

@@ -20,6 +20,9 @@ workspect/*
 rag_document/*
 !rag_document/.gitkeep
 
+# Temp files left behind by tools (e.g. an interrupted `uv export`)
+.tmp*
+
 # OS/editor files
 .DS_Store
 .vscode/
