@@ -80,13 +80,13 @@ def print_header(model: str, tool_count: int) -> None:
     short = model.split("/")[-1]
     inner = WIDTH - 2
     bar = f" {C_DIM}{'═' * WIDTH}{R}"
-    title_txt = "  ENDEAVOR AGENT LITE"
+    title_txt = "  ENDEAVOR LOCAL AGENT LITE"
     model_txt = f"  Model  {short}"
     pad_title = max(0, inner - len(title_txt))
     pad_model = max(0, inner - len(model_txt))
     print()
     print(bar)
-    print(f" {C_DIM}║{R}  {BOLD}\033[38;5;220mENDEAVOR AGENT LITE{R}{C_DIM}{'':>{pad_title - 20}}║{R}")
+    print(f" {C_DIM}║{R}  {BOLD}\033[38;5;220mENDEAVOR LOCAL AGENT LITE{R}{C_DIM}{'':>{pad_title - 20}}║{R}")
     print(f" {C_DIM}║{R}  {C_META}Model  {R}{BOLD}{C_AGENT}{short}{R}{C_DIM}{'':>{pad_model - 8 - len(short)}}║{R}")
     print(bar)
     print(f"   {C_META}{tool_count} tools{R}  {C_META}via mlx_vlm.server{R}")

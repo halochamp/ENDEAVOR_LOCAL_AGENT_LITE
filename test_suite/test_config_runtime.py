@@ -41,11 +41,47 @@ def _probe(extra: dict[str, str | None]) -> dict:
 def test_default_state_is_per_machine_and_unsafe_override_is_ignored(tmp_path):
     default = _probe({})
     assert default["data"] == default["default"]
-    assert default["data"].endswith("Library/Application Support/ENDEAVOR_AGENT_LITE")
+    # An install that predates the rename keeps its old directory; otherwise the new name.
+    assert default["data"].endswith((
+        "Library/Application Support/ENDEAVOR_LOCAL_AGENT_LITE",
+        "Library/Application Support/ENDEAVOR_AGENT_LITE",
+    ))
 
     unsafe = _probe({"LITE_DATA_DIR": str(tmp_path / "outside")})
     assert unsafe["data"] == unsafe["default"]
     assert unsafe["file"].startswith(unsafe["default"])
+
+
+def test_state_dir_uses_new_name_but_keeps_pre_rename_data(tmp_path):
+    sys.path.insert(0, str(PROJECT_ROOT))
+    import config
+
+    new_name = config.STATE_DIR_NAME
+    old_name = config.PRE_RENAME_STATE_DIR_NAME
+    assert (new_name, old_name) == ("ENDEAVOR_LOCAL_AGENT_LITE", "ENDEAVOR_AGENT_LITE")
+
+    # Fresh machine: neither exists -> new name.
+    assert config._choose_default_data_dir(tmp_path) == (tmp_path / new_name).resolve()
+
+    # Existing pre-rename data, no new directory -> keep using the old one, move nothing.
+    (tmp_path / old_name).mkdir()
+    (tmp_path / old_name / "file_index.sqlite3").write_bytes(b"existing index")
+    assert config._choose_default_data_dir(tmp_path) == (tmp_path / old_name).resolve()
+    assert not (tmp_path / new_name).exists()
+    assert (tmp_path / old_name / "file_index.sqlite3").read_bytes() == b"existing index"
+
+    # Once the new directory exists it wins, and the old one is left untouched.
+    (tmp_path / new_name).mkdir()
+    assert config._choose_default_data_dir(tmp_path) == (tmp_path / new_name).resolve()
+    assert (tmp_path / old_name / "file_index.sqlite3").exists()
+
+
+def test_both_state_names_are_accepted_override_targets():
+    import config
+
+    for name in (config.STATE_DIR_NAME, config.PRE_RENAME_STATE_DIR_NAME):
+        assert config._state_path_allowed(config.STATE_PARENT_DIR / name / "file_index.sqlite3")
+    assert not config._state_path_allowed(config.STATE_PARENT_DIR / "SomethingElse" / "x")
 
 
 def test_legacy_workspect_override_remains_explicitly_compatible():

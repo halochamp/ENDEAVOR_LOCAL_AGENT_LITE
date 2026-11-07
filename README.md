@@ -1,8 +1,10 @@
-# ENDEAVOR AGENT LITE
+# ENDEAVOR LOCAL AGENT LITE
+
+> เดิมชื่อ ENDEAVOR AGENT LITE (repository เดิม `halochamp/ENDEAVOR_AGENT_LITE`) — เปลี่ยนชื่อให้สอดคล้องกับ ENDEAVOR LOCAL AGENT TH ลิงก์เก่าบน GitHub จะส่งต่อมาที่นี่อัตโนมัติ
 
 ## ผู้ช่วย AI ภาษาไทยที่ทำงานบน Mac ของคุณเอง
 
-ENDEAVOR AGENT LITE ช่วยให้ Mac Apple Silicon เครื่องเล็ก รวมถึงรุ่นที่มี RAM 8 GB มี AI agent สำหรับงานกับไฟล์ เอกสาร รูปภาพ และข้อมูลปัจจุบันจากเว็บ โดยไม่ต้องส่งไฟล์ในเครื่องไปประมวลผลกับ LLM บนคลาวด์ และไม่มีค่า token รายเดือนสำหรับโมเดล
+ENDEAVOR LOCAL AGENT LITE ช่วยให้ Mac Apple Silicon เครื่องเล็ก รวมถึงรุ่นที่มี RAM 8 GB มี AI agent สำหรับงานกับไฟล์ เอกสาร รูปภาพ และข้อมูลปัจจุบันจากเว็บ โดยไม่ต้องส่งไฟล์ในเครื่องไปประมวลผลกับ LLM บนคลาวด์ และไม่มีค่า token รายเดือนสำหรับโมเดล
 
 คุณพิมพ์คำสั่งภาษาไทยตามปกติ แล้ว agent ช่วยค้นหาเอกสารที่หาไม่เจอ อ่านและสรุป PDF/Word/Excel ตรวจรูปภาพ ค้นเว็บพร้อมลิงก์อ้างอิง หรือสร้างไฟล์ผลลัพธ์ในพื้นที่ทำงานที่ควบคุมไว้ได้
 
@@ -51,7 +53,7 @@ LITE เลือกใช้โมเดล `mlx-community/Qwen3.5-2B-OptiQ-4bi
 
 ```bash
 # หลัง clone จาก URL ของ repository ที่เผยแพร่แล้ว
-cd ENDEAVOR_AGENT_LITE
+cd ENDEAVOR_LOCAL_AGENT_LITE
 bash install_library/install.sh
 ```
 
@@ -107,7 +109,7 @@ Agent Lite แยก RAG ออกจากตัว agent แล้ว: impleme
 
 - วาง source documents ใต้ `rag_document/` (รวม nested directories ได้)
 - ใช้ `/sync_kb` ใน CLI/Web UI หรือ MCP `rag_manage(action="sync")` เพื่อ rebuild แบบ incremental
-- ดัชนีและ runtime state อยู่ใน `~/Library/Application Support/ENDEAVOR_AGENT_LITE/` โดยค่าเริ่มต้น ไม่เขียนกลับ source documents
+- ดัชนีและ runtime state อยู่ใน `~/Library/Application Support/ENDEAVOR_LOCAL_AGENT_LITE/` โดยค่าเริ่มต้น ไม่เขียนกลับ source documents (เครื่องที่เคยติดตั้งไว้ก่อนเปลี่ยนชื่อและมีโฟลเดอร์เดิม `ENDEAVOR_AGENT_LITE/` อยู่แล้ว จะใช้โฟลเดอร์เดิมต่อโดยไม่ย้ายไฟล์)
 - `rag_search` ถูกจำกัดอยู่ใน Knowledge Base; การค้น Desktop/Documents ทั่วไปใช้ `local_search`/`bash` คนละ scope
 - ถ้า `lite-rag` ไม่มี, `rag_search` หาย หรือ MCP เชื่อมต่อไม่ได้ Agent จะหยุด retry RAG และ fallback ไป `bash` แบบ read-only ภายใน scope เดิม: KB → `rag_document/`, project/repository → repo ปัจจุบัน, local file ทั่วไป → Desktop/Documents
 - มีหน้า console ของ MCP-RagDoc แยกที่ `MCP-RagDoc/main.py` (loopback only) สำหรับ Search / Sync / Progress / Health
@@ -120,7 +122,7 @@ LITE ให้ความสำคัญกับการใช้งานไ
 
 - Local model server และ Web UI bind กับ `127.0.0.1` เท่านั้น
 - ไม่ใช้ LLM API บนคลาวด์: โมเดลทำงานผ่าน MLX บน Mac ของคุณ
-- SQLite index, cache และ log อยู่ใต้ `~/Library/Application Support/ENDEAVOR_AGENT_LITE/` โดยค่าเริ่มต้น; user-facing files ที่ agent สร้างยังถูกจำกัดไว้ใต้ `workspect/`
+- SQLite index, cache และ log อยู่ใต้ `~/Library/Application Support/ENDEAVOR_LOCAL_AGENT_LITE/` โดยค่าเริ่มต้น; user-facing files ที่ agent สร้างยังถูกจำกัดไว้ใต้ `workspect/`
 - `MCP-RagDoc` อ่าน source documents แบบ read-only และได้รับสิทธิ์เขียนเฉพาะ private runtime state ที่กำหนดไว้
 - การเขียนไฟล์ผู้ใช้ถูกจำกัดที่ `workspect/` และป้องกัน path traversal กับ symlink escape
 - path และเนื้อหาที่เข้าลักษณะ credential, token, private key หรือ session ถูกบล็อก/ไม่ส่งกลับเข้าบทสนทนา
@@ -149,7 +151,7 @@ LITE ให้ความสำคัญกับการใช้งานไ
 | `LITE_MODEL` | `mlx-community/Qwen3.5-2B-OptiQ-4bit` | model ID สำหรับ MLX server |
 | `LITE_MLX_BASE_URL` | `http://127.0.0.1:8090/v1` | URL ของ MLX server ในเครื่อง |
 | `LITE_INDEX_ROOTS` | `rag_document/md` | compatibility roots สำหรับ `/index`; `/sync_kb` ใช้ `rag_document/` ทั้ง tree |
-| `LITE_DATA_DIR` | `~/Library/Application Support/ENDEAVOR_AGENT_LITE` | private runtime state; override รับเฉพาะขอบเขตที่ config อนุญาต |
+| `LITE_DATA_DIR` | `~/Library/Application Support/ENDEAVOR_LOCAL_AGENT_LITE` (หรือโฟลเดอร์เดิม `ENDEAVOR_AGENT_LITE` ถ้ามีอยู่แล้วและยังไม่มีชื่อใหม่) | private runtime state; override รับเฉพาะขอบเขตที่ config อนุญาต |
 | `LITE_MLX_PYTHON` | Python ที่กำลังรัน Agent Lite | interpreter สำหรับเปิด local MLX server |
 | `LITE_MAX_TOOL_STEPS` | `10` | จำนวนรอบเรียก tool สูงสุดต่อคำถาม |
 | `LITE_UI_PORT` | `8766` | port ของ Web UI |

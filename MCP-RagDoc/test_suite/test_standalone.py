@@ -37,6 +37,7 @@ def _configure_instance(tmp_path, monkeypatch, *, semantic: bool = False):
 
 def test_standalone_sources_do_not_import_host_agent():
     forbidden = (
+        "ENDEAVOR_LOCAL_AGENT_LITE",
         "ENDEAVOR_AGENT_LITE",
         "from _bootstrap import PROJECT_ROOT",
         "from helpers import search_scope",

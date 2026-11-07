@@ -1,4 +1,4 @@
-# ENDEAVOR_AGENT_LITE project rules
+# ENDEAVOR_LOCAL_AGENT_LITE project rules
 
 - This public repository is self-contained; do not depend on a private parent repository.
 - Read [`AGENT.md`](AGENT.md) and [`AGENT_PROCEDURE.md`](AGENT_PROCEDURE.md) before substantial work.

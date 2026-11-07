@@ -1,4 +1,4 @@
-# ENDEAVOR_AGENT_LITE — Agent Overview
+# ENDEAVOR_LOCAL_AGENT_LITE — Agent Overview
 
 This is the quick operating map for an agent working directly in this public repository.
 
@@ -11,7 +11,7 @@ Read order:
 
 ## Core model
 
-ENDEAVOR_AGENT_LITE is a local-first Thai-capable AI agent designed for small Apple Silicon Macs. The implementation intentionally uses deterministic helpers and guardrails to compensate for a small local model.
+ENDEAVOR_LOCAL_AGENT_LITE is a local-first Thai-capable AI agent designed for small Apple Silicon Macs. The implementation intentionally uses deterministic helpers and guardrails to compensate for a small local model.
 
 The main invariants are:
 

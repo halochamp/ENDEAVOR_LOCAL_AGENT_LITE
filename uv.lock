@@ -225,7 +225,7 @@ wheels = [
 ]
 
 [[package]]
-name = "endeavor-agent-lite"
+name = "endeavor-local-agent-lite"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [

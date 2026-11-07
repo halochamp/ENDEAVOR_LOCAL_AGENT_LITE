@@ -1,4 +1,4 @@
-"""config.py — ENDEAVOR_AGENT_LITE configuration
+"""config.py — ENDEAVOR_LOCAL_AGENT_LITE configuration
 
 Single source of truth for model id, paths, and limits. Everything is
 env-overridable.
@@ -253,10 +253,31 @@ WORKSPECT_DIR.mkdir(parents=True, exist_ok=True)
 # is deliberately installed in another interpreter.
 MLX_SERVER_PYTHON = Path(os.getenv("LITE_MLX_PYTHON", sys.executable)).expanduser().absolute()
 
-DEFAULT_DATA_DIR = (
-    RUNTIME_HOME / "Library" / "Application Support" / "ENDEAVOR_AGENT_LITE"
-).resolve()
+STATE_PARENT_DIR = RUNTIME_HOME / "Library" / "Application Support"
+STATE_DIR_NAME = "ENDEAVOR_LOCAL_AGENT_LITE"
+# The project used to be called ENDEAVOR_AGENT_LITE. An install that already holds
+# data under that name keeps using it (nothing is moved or deleted); new installs
+# use STATE_DIR_NAME.
+PRE_RENAME_STATE_DIR_NAME = "ENDEAVOR_AGENT_LITE"
+
+
+def _choose_default_data_dir(parent: Path) -> Path:
+    """Pick the per-machine state directory under ``parent`` (see above)."""
+    current = (parent / STATE_DIR_NAME).resolve()
+    previous = (parent / PRE_RENAME_STATE_DIR_NAME).resolve()
+    return previous if previous.is_dir() and not current.exists() else current
+
+
+DEFAULT_DATA_DIR = _choose_default_data_dir(STATE_PARENT_DIR)
 LEGACY_DATA_DIR = (WORKSPECT_DIR / ".lite_state").resolve()
+# Both names live under the same Application Support parent, so either is a valid
+# explicit LITE_DATA_DIR / LITE_FILE_INDEX_DB target.
+_STATE_ROOTS = (
+    DEFAULT_DATA_DIR,
+    (STATE_PARENT_DIR / STATE_DIR_NAME).resolve(),
+    (STATE_PARENT_DIR / PRE_RENAME_STATE_DIR_NAME).resolve(),
+    WORKSPECT_DIR,
+)
 
 
 def _state_path_allowed(path: Path) -> bool:
@@ -265,7 +286,7 @@ def _state_path_allowed(path: Path) -> bool:
         resolved = path.expanduser().resolve(strict=False)
     except (OSError, RuntimeError, ValueError):
         return False
-    for root in (DEFAULT_DATA_DIR, WORKSPECT_DIR):
+    for root in _STATE_ROOTS:
         try:
             resolved.relative_to(root)
             return True

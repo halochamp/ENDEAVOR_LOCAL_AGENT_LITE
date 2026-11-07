@@ -150,7 +150,7 @@ cryptography==50.0.1 \
 ddgs==9.14.4 \
     --hash=sha256:acb084c34bf1110c974caf7e5e5a2c1973beb4bd9e170bfd191fe5ed2d2b2d6c \
     --hash=sha256:f7b118a2b709a9e9c04a1dca6e96b98c25d4dfaca1a4b0a244d74454fcca48ef
-    # via endeavor-agent-lite
+    # via endeavor-local-agent-lite
 distro==1.9.0 \
     --hash=sha256:2fa77c6fd8940f116ee1d6b94a2f90b13b5ea8d019b98bc8bafdcabcdd9bdbed \
     --hash=sha256:7bffd925d65168f85027d8da9af6bddab658135b840670a223589bc0c8ef02b2
@@ -169,7 +169,7 @@ fastapi==0.140.13 \
     --hash=sha256:500172a08cf1459901f90b05c37d93060dada3b573fec8f0862445db52ba6b4b \
     --hash=sha256:8b017110e1e9f30a95e8bdb8f71fbe2f0fe3af5717109e5b14f9e069df54f6d4
     # via
-    #   endeavor-agent-lite
+    #   endeavor-local-agent-lite
     #   mlx-vlm
 filelock==3.32.0 \
     --hash=sha256:7be2ad23a14607ccc71808e68fe30848aeace7058ace17852f68e2a68e310402 \
@@ -231,7 +231,7 @@ httpx==0.28.1 \
     --hash=sha256:d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad
     # via
     #   ddgs
-    #   endeavor-agent-lite
+    #   endeavor-local-agent-lite
     #   huggingface-hub
     #   langgraph-sdk
     #   langsmith
@@ -308,7 +308,7 @@ langchain-core==1.5.2 \
     --hash=sha256:2d13ab35b42eec63d4669a483776b8cdd778ee764107149369fb369d84c08c41 \
     --hash=sha256:a687dd7c3b22c6c1294e1c1eeb61fb6f3a308e6015a1d75b576b3836ad5b5aed
     # via
-    #   endeavor-agent-lite
+    #   endeavor-local-agent-lite
     #   langchain-openai
     #   langgraph
     #   langgraph-checkpoint
@@ -317,7 +317,7 @@ langchain-core==1.5.2 \
 langchain-openai==1.4.1 \
     --hash=sha256:6d16be615d997db80294731b8e768783f1fb8e0313668e64acd50cd68acbad20 \
     --hash=sha256:8528bb34cc78fdfd2d895573c7917f9441cbb82db5f18ae0e6b3b75d95bdefb3
-    # via endeavor-agent-lite
+    # via endeavor-local-agent-lite
 langchain-protocol==0.0.18 \
     --hash=sha256:70b53a86fbf9cedc863555effe44da192ab02d556ddbf2cf95b8873adcf41b5a \
     --hash=sha256:ec3e11782f1ed0c9db38e5a9ed01b0e7a0d3fba406faa8aef6594b73c56a63e6
@@ -327,7 +327,7 @@ langchain-protocol==0.0.18 \
 langgraph==1.2.10 \
     --hash=sha256:05a183a746ed570a06c7c1b879920163509a75df9e44e92dd2238218d677fd37 \
     --hash=sha256:52c48bd42fa31a1de0e1c0f0ebfe342e11ca2957b8b3563f83dbd60d8e30f921
-    # via endeavor-agent-lite
+    # via endeavor-local-agent-lite
 langgraph-checkpoint==4.1.1 \
     --hash=sha256:25d29144b082827218e7bc3f1e9b0566a4bb007895cd6cc26f66a8428739f56e \
     --hash=sha256:6c2bdb530c91f91d7d9c1bd100925d0fc4f498d418c17f3587d1526279482a25
@@ -405,7 +405,7 @@ markupsafe==3.0.3 \
 mcp==2.2.0 \
     --hash=sha256:2dc37ecb1974becdcebdbf7561e7c15a07dbbf20ba21ba16c3593b3038b3afbd \
     --hash=sha256:bde982589473a060ae145e3406e9a5333fe538c97229ba841f5a7f92be004f81
-    # via endeavor-agent-lite
+    # via endeavor-local-agent-lite
 mcp-types==2.2.0 \
     --hash=sha256:d3ed53703ddd10d9c6399f29d322bb66f3f67ab41348ac8556ba23e07fedefad \
     --hash=sha256:ea476b73ee86709ab5abc9452385ed36cc05907e582355622e294595c9a04f13
@@ -455,7 +455,7 @@ mlx-metal==0.32.0 ; sys_platform == 'darwin' \
 mlx-vlm==0.6.8 \
     --hash=sha256:5250c8245076e576274009b3c6c9ecd6672c686aeede5ed03e9b61ee836dac4f \
     --hash=sha256:acbd4f2652a61e71c0942177b9570331d3ed2d654c4f60f4e356680721bc09c2
-    # via endeavor-agent-lite
+    # via endeavor-local-agent-lite
 numpy==2.4.6 \
     --hash=sha256:0280e0356c0829a18d9de1cb7eee50ec22ca639878d7240307ca0943d73cd2c4 \
     --hash=sha256:0ab0a9c4ffb1a6d95ef519fe4247dba8eb6b18ad93999f76b7f657039acabd47 \
@@ -477,7 +477,7 @@ numpy==2.4.6 \
     --hash=sha256:f3a3570c4a2a16746ac2c31a7c7c7b0c186b95ce902e33db6f28094ed7387dda \
     --hash=sha256:f407cb6b8e9d6d8c626bc73c945db1706035af8fd632295547bf1c9e46d092d6
     # via
-    #   endeavor-agent-lite
+    #   endeavor-local-agent-lite
     #   mlx-audio
     #   mlx-lm
     #   mlx-vlm
@@ -491,7 +491,7 @@ onnxruntime==1.30.0 \
     --hash=sha256:bac3aee7b40acd805659fd81a2acd6096312d5b0f014c97ddfe75fb4c1644627 \
     --hash=sha256:f36c87ec504f4f328e968ee322e4ba9682abe66280b3425625afcbed5333fed7 \
     --hash=sha256:fd54b314ea385bcecac69ab431f020ba503e3878dad4ebb645fec5a24b041242
-    # via endeavor-agent-lite
+    # via endeavor-local-agent-lite
 openai==2.50.0 \
     --hash=sha256:5128f7caf4a6b01aefd6e7e93efe170a2c3427b8de286b9af5cdff3aa47e02c8 \
     --hash=sha256:90bdddcc5a2fa529b350fac9c5780d87e5c361dcc6090ab57b0d470b0d7af7fa
@@ -507,12 +507,12 @@ opencv-python==5.0.0.93 \
     --hash=sha256:f8b6d0a212253dd26ad338c812f1f23ca118fdf05a9c8c6b9444f161aa8c5881 \
     --hash=sha256:f90ba04b8f73bc5c3814037699739f0156f597338a98f05956c684e7c3ca10d2
     # via
-    #   endeavor-agent-lite
+    #   endeavor-local-agent-lite
     #   mlx-vlm
 openpyxl==3.1.5 \
     --hash=sha256:5282c12b107bffeef825f4617dc029afaf41d0ea60823bbb665ef3079dc79de2 \
     --hash=sha256:cf0e3cf56142039133628b5acffe8ef0c12bc902d2aadd3e0fe5878dc08d1050
-    # via endeavor-agent-lite
+    # via endeavor-local-agent-lite
 opentelemetry-api==1.44.0 \
     --hash=sha256:67647e5e9566edcf421166fdf022b3537f818635daa852b289e34604dc6fb33a \
     --hash=sha256:94b98c893a91b88657eaac1e3ba89618cdb85be6918196705354f34728b2cdef
@@ -576,7 +576,7 @@ pillow==12.3.0 \
     --hash=sha256:ebaea975e03d3141d9d3a507df75c9b3ec90fa9d2ffd07567b3a978d9d790b26 \
     --hash=sha256:fbd139c8447d25dd750ab79ee274cc5e1fe80fc56340ab10b18a195e1b6eca3e
     # via
-    #   endeavor-agent-lite
+    #   endeavor-local-agent-lite
     #   mlx-vlm
 pluggy==1.6.0 \
     --hash=sha256:7dcc130b76258d33b90f61b658791dede3486c3e6bfb003ee5c9bfb396dd22f3 \
@@ -677,18 +677,18 @@ pymupdf==1.28.0 \
     --hash=sha256:caea2b3b67347fd79e5d15ed7929b0e886aac594ea228073b6d39de0078189da \
     --hash=sha256:e01e90fd86abfeb37ceb921eddb951f988a11d45ff6ce6b7664f2039849068ec \
     --hash=sha256:e53f3567403a92da15caa9e7ae0164327fff48817e9f40175367fb9de524258d
-    # via endeavor-agent-lite
+    # via endeavor-local-agent-lite
 pytest==9.1.1 \
     --hash=sha256:1088fbde8f2b49d95a549a195707afa7a76a3ce9bcadc26b6d71f0ffda5fe313 \
     --hash=sha256:37a86b45efb9a47a61a36449063e8e18d0cab3161329fc099eb21783169c4f0c
 pythainlp==5.3.7 \
     --hash=sha256:625b32cd42320dc6e359315108c58eb62480804b16ae843ae3249d925f4f2cf9 \
     --hash=sha256:98b86c6d4a807749a8e9c9488090e20e0504f99be05b414b7da14dc5068a1f76
-    # via endeavor-agent-lite
+    # via endeavor-local-agent-lite
 python-docx==1.2.0 \
     --hash=sha256:3fd478f3250fbbbfd3b94fe1e985955737c145627498896a8a6bf81f4baf66c7 \
     --hash=sha256:7bc9d7b7d8a69c9c02ca09216118c86552704edc23bac179283f2e38f86220ce
-    # via endeavor-agent-lite
+    # via endeavor-local-agent-lite
 python-dotenv==1.2.2 \
     --hash=sha256:1d8214789a24de455a8b8bd8ae6fe3c6b69a5e3d64aa8a8e5d68e694bbcb285a \
     --hash=sha256:2c371a91fbd7ba082c2c1dc1f8bf89ca22564a087c2c287cd9b662adde799cf3
@@ -764,7 +764,7 @@ rich==15.0.0 \
     --hash=sha256:33bd4ef74232fb73fe9279a257718407f169c09b78a87ad3d296f548e27de0bb \
     --hash=sha256:edd07a4824c6b40189fb7ac9bc4c52536e9780fbbfbddf6f1e2502c31b068c36
     # via
-    #   endeavor-agent-lite
+    #   endeavor-local-agent-lite
     #   typer
 rpds-py==2026.6.3 \
     --hash=sha256:127e08c0642d880cf32ca47ec2a4a77b901f7e2dd1ad9762adb13955d72ffcc9 \
@@ -840,7 +840,7 @@ sentencepiece==0.2.2 \
     --hash=sha256:6dd76f3e5c8b2eb8a3a3efee787bbf5b9a66e52a048fe09cab85eca33fec6790 \
     --hash=sha256:70d4ca6f4d06df7f0ccab6fe4f49c8a712c8c8b6847b4f0af9a0e1dbb0e0337e
     # via
-    #   endeavor-agent-lite
+    #   endeavor-local-agent-lite
     #   mlx-lm
 shellingham==1.5.4 \
     --hash=sha256:7ecfff8f2fd72616f7481040475a65b2bf8af90a56c89140852d1120324e8686 \
@@ -1001,7 +1001,7 @@ uvicorn==0.51.0 \
     --hash=sha256:5d38af6cd620f2ae3849fb44fd4879e0890aa1febe8d47eb355fb45d93fe6a5b \
     --hash=sha256:f6f4b69b657c312f516dd2d268ab9ae6f254b11e4bac504f37b2ab58b24dd0b0
     # via
-    #   endeavor-agent-lite
+    #   endeavor-local-agent-lite
     #   mcp
     #   mlx-vlm
 uvloop==0.22.1 ; platform_python_implementation != 'PyPy' and sys_platform != 'cygwin' and sys_platform != 'win32' \
@@ -1055,7 +1055,7 @@ websockets==15.0.1 \
 xlrd==2.0.2 \
     --hash=sha256:08b5e25de58f21ce71dc7db3b3b8106c1fa776f3024c54e45b45b374e89234c9 \
     --hash=sha256:ea762c3d29f4cca48d82df517b6d89fbce4db3107f9d78713e48cd321d5c9aa9
-    # via endeavor-agent-lite
+    # via endeavor-local-agent-lite
 xxhash==3.8.1 \
     --hash=sha256:027dee4355f3fcc41481650d846cf6cfc895c85a1ab7acd063063821a0df5b4c \
     --hash=sha256:0418ec8b2331b9d4d575fc9284427e8e69449d7172e99e1a86fcdd1f51a0a937 \

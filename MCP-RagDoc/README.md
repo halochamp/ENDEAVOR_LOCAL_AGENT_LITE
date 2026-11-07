@@ -38,7 +38,7 @@ rolls back and an incomplete semantic generation is never published ready.
   and Apple Vision OCR support used by the RAG pipeline.
 - `requirements.txt` — Python runtime dependencies.
 
-Nothing in this directory imports `ENDEAVOR_AGENT_LITE`, its `config.py`, its
+Nothing in this directory imports `ENDEAVOR_LOCAL_AGENT_LITE`, its `config.py`, its
 `tools/`, or its `helpers/` tree. Host-specific routing/retry/turn guards belong
 in the host agent, not in MCP-RagDoc.
 

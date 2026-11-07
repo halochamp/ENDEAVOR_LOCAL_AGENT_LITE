@@ -1,4 +1,4 @@
-# Bug Report — ENDEAVOR_AGENT_LITE
+# Bug Report — ENDEAVOR_LOCAL_AGENT_LITE
 
 ## 2026-07-28 — Web UI disconnect cancellation, localhost CSRF, attachment retention
 

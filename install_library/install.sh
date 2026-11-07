@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install ENDEAVOR AGENT LITE into a project-local Python 3.11 virtual env.
+# Install ENDEAVOR LOCAL AGENT LITE into a project-local Python 3.11 virtual env.
 #
 # Usage:
 #   bash install_library/install.sh
@@ -15,12 +15,12 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 VENV_DIR="$PROJECT_DIR/.venv"
 PYTHON_BIN="${PYTHON_BIN:-python3.11}"
 
-echo "=== ENDEAVOR AGENT LITE installer ==="
+echo "=== ENDEAVOR LOCAL AGENT LITE installer ==="
 echo
 
 echo "[1/5] Checking platform"
 if [[ "$(uname -s)" != "Darwin" ]]; then
-  echo "[error] ENDEAVOR AGENT LITE requires macOS because MLX uses Apple Metal."
+  echo "[error] ENDEAVOR LOCAL AGENT LITE requires macOS because MLX uses Apple Metal."
   exit 1
 fi
 if [[ "$(uname -m)" != "arm64" ]]; then

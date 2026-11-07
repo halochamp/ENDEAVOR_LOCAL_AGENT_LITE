@@ -1,6 +1,6 @@
 # Security policy
 
-ENDEAVOR AGENT LITE works with local files and launches local processes. Do
+ENDEAVOR LOCAL AGENT LITE works with local files and launches local processes. Do
 not report suspected vulnerabilities in a public issue.
 
 Send a private report to **champoomwat@gmail.com** with:

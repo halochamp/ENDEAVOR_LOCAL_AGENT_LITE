@@ -22,7 +22,7 @@ def test_browser_page_and_websocket_initial_state():
     with TestClient(web_ui.app) as client:
         page = client.get("/")
         assert page.status_code == 200
-        assert "ENDEAVOR AGENT LITE" in page.text
+        assert "ENDEAVOR LOCAL AGENT LITE" in page.text
         assert client.get("/ui-token").json() == {"token": ""}
         with client.websocket_connect("/ws", headers={"origin": f"http://127.0.0.1:{config.UI_PORT}"}) as ws:
             status = ws.receive_json()

@@ -1,4 +1,4 @@
-# ENDEAVOR_AGENT_LITE — Agent Procedure
+# ENDEAVOR_LOCAL_AGENT_LITE — Agent Procedure
 
 This is the complete repository-agent workflow for the standalone public project.
 

@@ -1,4 +1,4 @@
-# ENDEAVOR_AGENT_LITE — Walking Test
+# ENDEAVOR_LOCAL_AGENT_LITE — Walking Test
 
 > Structure required by `/walk` (`~/.claude/skills/walk/SKILL.md`). Arch: create_react_agent
 > (LangGraph) + the configured LITE model via mlx_vlm.server. This test is local-only
@@ -14,7 +14,7 @@
 
 ## Config
 - START_COMMAND: curl -sf "${LITE_MLX_BASE_URL:-http://127.0.0.1:8090/v1}/models" >/dev/null || echo "[ERROR] mlx_vlm.server is not ready — start it first, see precondition note above"; source .venv/bin/activate; python ui_cli.py
-- READY_SIGNAL: ENDEAVOR AGENT LITE
+- READY_SIGNAL: ENDEAVOR LOCAL AGENT LITE
 - RESPONSE_END_MARKER: ╌╌╌╌
 - REGRESSION_TESTS: python -m pytest -q test_suite
 - PRE_COMMIT_GATE: grep -n "raise RuntimeError" agent.py react.py
@@ -33,7 +33,7 @@ Query: PLAN.md อยู่ที่ไหนในโปรเจกต์น�
 STATEFUL: false
 Assert:
   - response contains "PLAN.md"
-  - response contains the current LITE project path or "ENDEAVOR_AGENT_LITE/PLAN.md" (must not return a sibling-project PLAN file)
+  - response contains the current LITE project path or "ENDEAVOR_LOCAL_AGENT_LITE/PLAN.md" (must not return a sibling-project PLAN file)
   - TEST_LOG contains "⎿ File Search"
 
 ### T02 — content search: RAG/File Search first

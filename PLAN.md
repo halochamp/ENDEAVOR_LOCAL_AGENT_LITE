@@ -1,4 +1,4 @@
-# ENDEAVOR_AGENT_LITE — Implementation Plan
+# ENDEAVOR_LOCAL_AGENT_LITE — Implementation Plan
 
 > วันที่วางแผน: 2026-07-23 · สถานะ: **รออนุมัติ / ยังไม่เริ่ม implement**
 > เครื่องเป้าหมาย: **Backup Mac (HaloChampMacBook Air, RAM 8GB)** — `whoami` = `halochampmac`
@@ -45,7 +45,7 @@ user-profile learning — ทั้งหมดนี้**ตัดทิ้ง*
 ## 4. โครงสร้างไฟล์
 
 ```
-ENDEAVOR_AGENT_LITE/
+ENDEAVOR_LOCAL_AGENT_LITE/
 ├── PLAN.md                  # ไฟล์นี้
 ├── config.py                # model id, paths, limits ทั้งหมด (env-overridable)
 ├── llm.py                   # mlx_vlm in-process wrapper: load-once, generate, chat template
@@ -238,7 +238,7 @@ Threshold ตัดสินใจ: นับ token ของ prompt จริ�
 - **2B ไม่ฉลาดพอจะ self-correct** — ระบบนี้ออกแบบโดยยอมรับข้อนี้: guardrails ทำงานแทน ไม่หวังพึ่ง prompt อย่างเดียว (CLAUDE.md §1: ไล่ prompt → code-level fixes ให้สุดก่อนสรุป model ceiling)
 - **เครื่องนี้คือ Backup Mac** — LLM live tests (Phase 1.4, 4, 5) รันบนเครื่องนี้ได้ *เพราะ agent lite ออกแบบมาให้รันบนเครื่องนี้เอง* (in-process, ไม่แตะ :8080/:8085 ของ Main Mac) แต่ห้ามรันพร้อมงาน LLM อื่น และ**ห้าม git commit จากเครื่องนี้**
 - **FTS5 ไม่มี semantic search** — "หาไฟล์เกี่ยวกับ X" ที่ไม่มีคำว่า X ตรงๆ ในไฟล์จะไม่เจอ; ยอมรับ trade-off นี้ (ถ้าเจ็บจริงค่อยพิจารณา MiniLM on-demand ภายหลัง)
-- **iCloud sync**: `data/*.sqlite3` อยู่ใต้ Desktop ซึ่ง sync กับ Main Mac — index ควร**สร้างต่อเครื่อง** ไม่ควร sync ข้าม; จะกันด้วยการใส่ hostname ในชื่อไฟล์ index หรือย้าย data/ ออกนอก iCloud path (`~/Library/Application Support/ENDEAVOR_AGENT_LITE/`) — **เลือกอย่างหลัง**
+- **iCloud sync**: `data/*.sqlite3` อยู่ใต้ Desktop ซึ่ง sync กับ Main Mac — index ควร**สร้างต่อเครื่อง** ไม่ควร sync ข้าม; จะกันด้วยการใส่ hostname ในชื่อไฟล์ index หรือย้าย data/ ออกนอก iCloud path (`~/Library/Application Support/ENDEAVOR_LOCAL_AGENT_LITE/`; ชื่อเดิม `ENDEAVOR_AGENT_LITE`) — **เลือกอย่างหลัง**
 
 ### Phase 8 — สลับสถาปัตยกรรมไปใช้ LangGraph + mlx_vlm.server จริง (2026-07-23)
 
